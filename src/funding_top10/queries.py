@@ -37,12 +37,11 @@ from funding_rate_data_original
 -- BINANCE-U only (per project scope)
 and exchange = 'BINANCE-U'
 )
--- 过去3天 funding的均值和方差
+-- 过去3天 funding 总额（不取均值——这样跟 funding 周期无关）
 , past_3day as
 (
 select exchange,symbol,base,"quote" ,settle,
-avg(funding_rate) as mean_3d_funding_rate,
-stddev(funding_rate) as std_3d_funding_rate
+sum(funding_rate) as sum_3d_funding_rate
 from funding_rate_data_original
 where "timestamp" >
 (
@@ -55,9 +54,9 @@ exchange,symbol,base,"quote" ,settle
 )
 , past_7day as
 (
--- 过去7天 funding的均值和方差
+-- 过去7天 funding 总额 + per-event std（注：std 量纲随 funding 周期变化，仅作参考）
 select exchange,symbol,base,"quote" ,settle,
-avg(funding_rate) as mean_7d_funding_rate,
+sum(funding_rate) as sum_7d_funding_rate,
 stddev(funding_rate) as std_7d_funding_rate
 from funding_rate_data_original
 where "timestamp" >
@@ -72,8 +71,8 @@ exchange,symbol,base,"quote" ,settle
 , funding_stats as
 (
 select recent_funding.*,
-mean_3d_funding_rate,
-mean_7d_funding_rate,
+sum_3d_funding_rate,
+sum_7d_funding_rate,
 std_7d_funding_rate
 from recent_funding
 left join past_3day on recent_funding.exchange = past_3day.exchange

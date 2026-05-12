@@ -1,10 +1,19 @@
 """Build and post the daily Slack report.
 
 A single table merges the funding-stability Top 10 with biyi-strategy tickers,
-sorted by mean_7d_funding_rate desc. Biyi rows are prefixed with 🔴.
+sorted by sum_7d_funding_rate desc. Biyi rows are flagged with 🔴 in a
+dedicated leading column so column alignment is not affected by emoji width.
 
 Columns (in order):
-  exchange | symbol | timestamp | funding_rate | mean_3d | mean_7d | std_7d | OI | haircut
+  flag | exchange | symbol(base) | timestamp | funding(bp) |
+  3d_apr% | 7d_apr% | std_7d(bp) | OI | haircut
+
+- funding(bp):  raw funding_rate × 10000, no fixed decimals (Python ``:g``).
+- 3d_apr% / 7d_apr%: annualized return from sum of funding over the last 3/7
+  days: ``sum × 365 / N_days × 100``. This is INDEPENDENT of the per-symbol
+  funding cadence (1h/4h/8h) because sum captures total funding paid.
+- std_7d(bp):  per-event funding stddev × 10000. Not annualized — its scale
+  depends on the funding cadence, so it's a within-symbol indicator only.
 """
 
 from __future__ import annotations
@@ -16,8 +25,9 @@ import httpx
 import pandas as pd
 
 
-HIGHLIGHT = "🔴"
-NO_HIGHLIGHT = "  "  # two ASCII spaces — visual width approximates the emoji cell
+HIGHLIGHT = "🔴 "  # emoji + 1 ASCII space ≈ 3 monospace cells in Slack
+NO_FLAG = "   "    # 3 ASCII spaces — same visual width as HIGHLIGHT
+FLAG_HEADER = "   "  # blank header for the flag column
 
 
 def _fmt_float(x, digits: int) -> str:
@@ -30,6 +40,36 @@ def _fmt_float(x, digits: int) -> str:
     if math.isnan(xf):
         return "n/a"
     return f"{xf:.{digits}f}"
+
+
+def _fmt_bp(x) -> str:
+    """raw × 10000, no fixed decimals (trailing zeros stripped, sign shown)."""
+    if x is None:
+        return "n/a"
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return "n/a"
+    if math.isnan(xf):
+        return "n/a"
+    return f"{xf * 10000:+g}"
+
+
+def _fmt_apr(x, days: int) -> str:
+    """Annualize a sum-of-funding over N days as +/-X.X%.
+
+    APR = sum × 365 / days × 100. Funding-cadence-independent (sum captures
+    total payments regardless of 1h/4h/8h cadence).
+    """
+    if x is None:
+        return "n/a"
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return "n/a"
+    if math.isnan(xf):
+        return "n/a"
+    return f"{xf * 365 / days * 100:+.1f}%"
 
 
 def _fmt_human_usd(x) -> str:
@@ -53,34 +93,61 @@ def _fmt_human_usd(x) -> str:
 
 
 def _fmt_timestamp_bj(ts) -> str:
-    """Format epoch-ms timestamp as 'MM-DD HH:MM' in Asia/Shanghai. 'n/a' on failure."""
+    """Format an epoch timestamp as 'MM-DD HH:MM' in Asia/Shanghai.
+
+    Auto-detects the unit (seconds / milliseconds / microseconds) based on
+    magnitude so the function works regardless of which form the DB returns.
+    Returns 'n/a' on any failure.
+    """
     if ts is None:
         return "n/a"
     if isinstance(ts, float) and math.isnan(ts):
         return "n/a"
+
     try:
-        dt = pd.Timestamp(int(ts), unit="ms", tz="UTC").tz_convert("Asia/Shanghai")
+        val = int(ts)
+    except (TypeError, ValueError):
+        # Already a Timestamp-like? Try direct conversion.
+        try:
+            dt = pd.Timestamp(ts)
+            if dt.tz is None:
+                dt = dt.tz_localize("UTC")
+            return dt.tz_convert("Asia/Shanghai").strftime("%m-%d %H:%M")
+        except Exception:
+            return "n/a"
+
+    if val > 10**15:
+        unit = "us"
+    elif val > 10**12:
+        unit = "ms"
+    elif val > 10**9:
+        unit = "s"
+    else:
+        return "n/a"
+
+    try:
+        dt = pd.Timestamp(val, unit=unit, tz="UTC").tz_convert("Asia/Shanghai")
         return dt.strftime("%m-%d %H:%M")
     except Exception:
         return "n/a"
 
 
-_HEADER_FMT = (
-    "{prefix:<2s} {exchange:<10s} {symbol:<12s} {ts:<11s} "
-    "{fr:>10s} {m3:>10s} {m7:>10s} {s7:>10s} {oi:>8s} {hc:>8s}"
+_BODY_FMT = (
+    "{flag}{exchange:<10s} {symbol:<16s} {ts:<11s} "
+    "{fr:>11s} {apr3:>9s} {apr7:>9s} {s7:>10s} {oi:>8s} {hc:>8s}"
 )
 
 
 def _header_line() -> str:
-    return _HEADER_FMT.format(
-        prefix="",
+    return _BODY_FMT.format(
+        flag=FLAG_HEADER,
         exchange="exchange",
         symbol="symbol",
         ts="timestamp",
-        fr="funding",
-        m3="mean_3d",
-        m7="mean_7d",
-        s7="std_7d",
+        fr="funding(bp)",
+        apr3="3d_apr%",
+        apr7="7d_apr%",
+        s7="std_7d(bp)",
         oi="OI",
         hc="haircut",
     )
@@ -90,18 +157,24 @@ def _row_line(row: pd.Series, biyi_set: set[str]) -> str:
     base = row.get("base") if "base" in row else None
     quote = row.get("quote") if "quote" in row else None
     ticker = f"{base}/{quote}" if base is not None and quote is not None else ""
-    prefix = HIGHLIGHT if ticker in biyi_set else NO_HIGHLIGHT
-    return _HEADER_FMT.format(
-        prefix=prefix,
+    flag = HIGHLIGHT if ticker in biyi_set else NO_FLAG
+
+    symbol_display = str(
+        row.get("base") if "base" in row and row.get("base") is not None
+        else row.get("symbol") or "n/a"
+    )[:16]
+
+    return _BODY_FMT.format(
+        flag=flag,
         exchange=str(row.get("exchange") or "n/a")[:10],
-        symbol=str(row.get("symbol") or "n/a")[:12],
+        symbol=symbol_display,
         ts=_fmt_timestamp_bj(row.get("timestamp")),
-        fr=_fmt_float(row.get("funding_rate"), 6),
-        m3=_fmt_float(row.get("mean_3d_funding_rate"), 6),
-        m7=_fmt_float(row.get("mean_7d_funding_rate"), 6),
-        s7=_fmt_float(row.get("std_7d_funding_rate"), 6),
+        fr=_fmt_bp(row.get("funding_rate")),
+        apr3=_fmt_apr(row.get("sum_3d_funding_rate"), 3),
+        apr7=_fmt_apr(row.get("sum_7d_funding_rate"), 7),
+        s7=_fmt_bp(row.get("std_7d_funding_rate")),
         oi=_fmt_human_usd(row.get("open_interest_value")),
-        hc=_fmt_float(row.get("haircut"), 4),
+        hc=_fmt_float(row.get("haircut"), 2),
     )
 
 
@@ -110,13 +183,7 @@ def build_message(
     biyi_tickers: Iterable[str],
     report_date_str: str,
 ) -> str:
-    """Render the merged Top10 + biyi table for Slack.
-
-    Args:
-        rows_df:        the merged rows to display (already sorted as desired).
-        biyi_tickers:   iterable of "BASE/QUOTE" strings — used to mark rows 🔴.
-        report_date_str: e.g. "2026-05-12".
-    """
+    """Render the merged Top10 + biyi table for Slack."""
     biyi_set = set(biyi_tickers)
     lines: list[str] = [
         f"*Funding Top 10 ∪ Biyi (BINANCE-U) — {report_date_str}*",

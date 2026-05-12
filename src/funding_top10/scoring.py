@@ -1,8 +1,10 @@
 """Scoring / ranking for funding-rate symbols.
 
 Two-step procedure for picking the daily top 10 (Q6=b):
-  1. Drop rows with haircut > MAX_HAIRCUT (NaN haircut is kept).
-  2. Sort the remainder by mean_7d_funding_rate DESC, take the top TOP_X_BY_MEAN.
+  1. Drop rows whose haircut is null/"None" or strictly less than MIN_HAIRCUT
+     (in this codebase a *higher* haircut means a more attractive candidate —
+     it is a margin / weight allowance, not a risk penalty).
+  2. Sort the remainder by sum_7d_funding_rate DESC, take the top TOP_X_BY_MEAN.
   3. From that subset, drop NaN-std rows, sort by std_7d_funding_rate ASC,
      take the top TOP_N_FINAL.
 
@@ -21,7 +23,7 @@ import pandas as pd
 
 TOP_X_BY_MEAN = 50
 TOP_N_FINAL = 10
-MAX_HAIRCUT = 0.5
+MIN_HAIRCUT = 0.5
 
 
 def select_top10(
@@ -29,33 +31,38 @@ def select_top10(
     *,
     top_x_by_mean: int = TOP_X_BY_MEAN,
     top_n_final: int = TOP_N_FINAL,
-    max_haircut: float | None = MAX_HAIRCUT,
+    min_haircut: float | None = MIN_HAIRCUT,
 ) -> pd.DataFrame:
     """Apply the two-step funding-stability ranking.
 
     Args:
-        df: DataFrame with at least mean_7d_funding_rate, std_7d_funding_rate,
-            and (if max_haircut is not None) haircut.
+        df: DataFrame with at least sum_7d_funding_rate, std_7d_funding_rate,
+            and (if min_haircut is not None) haircut.
         top_x_by_mean: how many to keep after the mean-desc cut.
         top_n_final:   how many to keep after the std-asc cut.
-        max_haircut:   drop rows whose haircut is strictly greater than this.
-                       NaN haircut is preserved. Pass None to skip the filter.
+        min_haircut:   drop rows whose haircut is missing (NaN or the literal
+                       string "None") or strictly less than this threshold.
+                       Pass None to skip the filter entirely.
 
     Returns:
         A new DataFrame of at most ``top_n_final`` rows, ordered by
         ``std_7d_funding_rate`` ascending.
     """
-    required = {"mean_7d_funding_rate", "std_7d_funding_rate"}
+    required = {"sum_7d_funding_rate", "std_7d_funding_rate"}
     missing = required - set(df.columns)
     if missing:
         raise KeyError(f"select_top10: missing required columns {missing}")
 
     filtered = df
-    if max_haircut is not None and "haircut" in df.columns:
-        # `df['haircut'] > max_haircut` is False for NaN, so the ~ keeps NaN rows.
-        filtered = filtered[~(filtered["haircut"] > max_haircut)]
+    if min_haircut is not None and "haircut" in df.columns:
+        # Some DB drivers return null haircuts as the literal string "None";
+        # drop those first, then numerically compare. to_numeric coerces any
+        # still-non-numeric value to NaN, which fails the >= test and is dropped.
+        filtered = filtered[filtered["haircut"].astype(str) != "None"]
+        haircut_numeric = pd.to_numeric(filtered["haircut"], errors="coerce")
+        filtered = filtered[haircut_numeric >= min_haircut]
 
-    by_mean = filtered.sort_values("mean_7d_funding_rate", ascending=False).head(top_x_by_mean)
+    by_mean = filtered.sort_values("sum_7d_funding_rate", ascending=False).head(top_x_by_mean)
     by_std = by_mean.dropna(subset=["std_7d_funding_rate"]).sort_values(
         "std_7d_funding_rate", ascending=True
     )
@@ -73,23 +80,23 @@ def select_rows_to_show(
     *,
     top_x_by_mean: int = TOP_X_BY_MEAN,
     top_n_final: int = TOP_N_FINAL,
-    max_haircut: float | None = MAX_HAIRCUT,
+    min_haircut: float | None = MIN_HAIRCUT,
 ) -> pd.DataFrame:
     """Merge top10 with biyi rows from funding_df.
 
-    Top10 is selected with the haircut filter applied.
-    Biyi rows are pulled directly from funding_df with NO haircut filter, so a
-    biyi ticker with haircut > max_haircut still appears.
+    Top10 is selected with the haircut filter applied (haircut must be >=
+    min_haircut). Biyi rows are pulled directly from funding_df with NO
+    haircut filter, so a biyi ticker with low/missing haircut still appears.
 
     The merged result is deduped by 'BASE/QUOTE' ticker and sorted by
-    ``mean_7d_funding_rate`` descending — this layout lets the reader see where
+    ``sum_7d_funding_rate`` descending — this layout lets the reader see where
     each biyi ticker falls on the funding leaderboard.
     """
     top10 = select_top10(
         funding_df,
         top_x_by_mean=top_x_by_mean,
         top_n_final=top_n_final,
-        max_haircut=max_haircut,
+        min_haircut=min_haircut,
     )
     biyi_set = set(biyi_tickers)
 
@@ -113,6 +120,6 @@ def select_rows_to_show(
     merged = pd.concat([top10, biyi_extra], ignore_index=True)
     if len(merged):
         merged = merged.sort_values(
-            "mean_7d_funding_rate", ascending=False
+            "sum_7d_funding_rate", ascending=False
         ).reset_index(drop=True)
     return merged

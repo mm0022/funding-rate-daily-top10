@@ -53,7 +53,7 @@ def fetch_funding_stats(engine) -> pd.DataFrame:
     with engine.connect() as conn:
         df = pd.read_sql_query(text(FUNDING_STATS_SQL), conn)
     # Defensive: drop any duplicate columns (e.g. if a future SQL change brings
-    # back the historical duplicate mean_7d_funding_rate column).
+    # back the historical duplicate sum_7d_funding_rate column).
     return df.loc[:, ~df.columns.duplicated()]
 
 

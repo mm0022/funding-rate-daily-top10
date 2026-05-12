@@ -3,7 +3,9 @@ import pandas as pd
 
 from funding_top10.slack_message import (
     HIGHLIGHT,
-    NO_HIGHLIGHT,
+    NO_FLAG,
+    _fmt_apr,
+    _fmt_bp,
     _fmt_float,
     _fmt_human_usd,
     _fmt_timestamp_bj,
@@ -18,8 +20,8 @@ _COLUMNS = [
     "quote",
     "timestamp",
     "funding_rate",
-    "mean_3d_funding_rate",
-    "mean_7d_funding_rate",
+    "sum_3d_funding_rate",
+    "sum_7d_funding_rate",
     "std_7d_funding_rate",
     "open_interest_value",
     "haircut",
@@ -30,34 +32,49 @@ def _make_rows_df(rows):
     return pd.DataFrame(rows, columns=_COLUMNS)
 
 
-def test_biyi_rows_get_red_circle_prefix():
+def test_biyi_rows_get_red_circle_flag():
     df = _make_rows_df(
         [
-            ("BINANCE-U", "ENAUSDT", "ENA", "USDT", 1747900800000, 0.0001, 0.00012, 0.00013, 0.000005, 1.2e6, 0.10),
-            ("BINANCE-U", "ABCUSDT", "ABC", "USDT", 1747900800000, 0.0001, 0.00011, 0.00011, 0.000008, 9.1e5, 0.10),
+            ("BINANCE-U", "ENAUSDT", "ENA", "USDT", 1747900800000, 0.0001, 0.00012, 0.00013, 0.000005, 1.2e6, 0.80),
+            ("BINANCE-U", "ABCUSDT", "ABC", "USDT", 1747900800000, 0.0001, 0.00011, 0.00011, 0.000008, 9.1e5, 0.80),
         ]
     )
     msg = build_message(df, biyi_tickers=["ENA/USDT"], report_date_str="2026-05-12")
-    code_lines = [line for line in msg.splitlines() if "USDT" in line and "```" not in line and "Biyi" not in line]
-    ena = next(line for line in code_lines if "ENAUSDT" in line)
-    abc = next(line for line in code_lines if "ABCUSDT" in line)
+    code_lines = [
+        line for line in msg.splitlines()
+        if "BINANCE-U" in line and "```" not in line and not line.startswith("*")
+    ]
+    ena = next(line for line in code_lines if "ENA " in line and "ENA/USDT" not in line)
+    abc = next(line for line in code_lines if "ABC " in line)
     assert ena.startswith(HIGHLIGHT)
-    assert abc.startswith(NO_HIGHLIGHT)
+    assert abc.startswith(NO_FLAG)
 
 
-def test_header_has_all_nine_columns():
+def test_symbol_column_shows_base_only():
+    df = _make_rows_df(
+        [("BINANCE-U", "1000FLOKIUSDT", "1000FLOKI", "USDT", 1747900800000, 0.0, 0.0, 0.0, 0.0, 1e6, 0.8)]
+    )
+    msg = build_message(df, biyi_tickers=[], report_date_str="2026-05-12")
+    line = next(
+        line for line in msg.splitlines()
+        if "BINANCE-U" in line and "```" not in line and not line.startswith("*")
+    )
+    assert "1000FLOKI" in line
+    assert "1000FLOKIUSDT" not in line
+
+
+def test_header_has_all_columns_plus_blank_flag():
     df = _make_rows_df([])
     msg = build_message(df, biyi_tickers=[], report_date_str="2026-05-12")
-    header = [line for line in msg.splitlines() if "exchange" in line and "symbol" in line]
-    assert len(header) == 1
-    h = header[0]
-    for col in ["exchange", "symbol", "timestamp", "funding", "mean_3d", "mean_7d", "std_7d", "OI", "haircut"]:
-        assert col in h, f"missing column header: {col}"
+    header = next(line for line in msg.splitlines() if "exchange" in line and "symbol" in line)
+    for col in ["exchange", "symbol", "timestamp", "funding(bp)", "3d_apr%", "7d_apr%", "std_7d(bp)", "OI", "haircut"]:
+        assert col in header, f"missing column header: {col}"
+    assert header.index("exchange") == 3
 
 
 def test_empty_biyi_no_footer_line():
     df = _make_rows_df(
-        [("BINANCE-U", "ETHUSDT", "ETH", "USDT", 1747900800000, 0.0, 0.0, 0.0, 0.0, 1e6, 0.1)]
+        [("BINANCE-U", "ETHUSDT", "ETH", "USDT", 1747900800000, 0.0, 0.0, 0.0, 0.0, 1e6, 0.8)]
     )
     msg = build_message(df, biyi_tickers=[], report_date_str="2026-05-12")
     assert "Biyi tickers" not in msg
@@ -66,10 +83,8 @@ def test_empty_biyi_no_footer_line():
 def test_biyi_footer_lists_tickers_sorted():
     df = _make_rows_df([])
     msg = build_message(df, biyi_tickers=["ZZZ/USDT", "AAA/USDT"], report_date_str="2026-05-12")
-    footer = [line for line in msg.splitlines() if line.startswith("_Biyi tickers")]
-    assert len(footer) == 1
-    f = footer[0]
-    assert f.index("AAA/USDT") < f.index("ZZZ/USDT")
+    footer = next(line for line in msg.splitlines() if line.startswith("_Biyi tickers"))
+    assert footer.index("AAA/USDT") < footer.index("ZZZ/USDT")
 
 
 def test_nan_values_render_as_na():
@@ -77,17 +92,35 @@ def test_nan_values_render_as_na():
         [("BINANCE-U", "ETHUSDT", "ETH", "USDT", None, np.nan, np.nan, 0.01, np.nan, np.nan, np.nan)]
     )
     msg = build_message(df, biyi_tickers=[], report_date_str="2026-05-12")
-    line = [line for line in msg.splitlines() if "ETHUSDT" in line][0]
+    line = next(
+        line for line in msg.splitlines()
+        if "BINANCE-U" in line and "```" not in line and not line.startswith("*")
+    )
     assert line.count("n/a") >= 4
 
 
-def test_timestamp_formatted_as_beijing_mm_dd_hh_mm():
+def test_timestamp_in_ms_formats_correctly():
     # 1747900800000 ms = 2025-05-22 08:00 UTC = 2025-05-22 16:00 Beijing
     df = _make_rows_df(
-        [("BINANCE-U", "ETHUSDT", "ETH", "USDT", 1747900800000, 0.0001, 0.0001, 0.0001, 0.00001, 1e6, 0.1)]
+        [("BINANCE-U", "ETHUSDT", "ETH", "USDT", 1747900800000, 0.0001, 0.0001, 0.0001, 0.00001, 1e6, 0.8)]
     )
     msg = build_message(df, biyi_tickers=[], report_date_str="2026-05-12")
-    line = [line for line in msg.splitlines() if "ETHUSDT" in line][0]
+    line = next(
+        line for line in msg.splitlines()
+        if "BINANCE-U" in line and "```" not in line and not line.startswith("*")
+    )
+    assert "05-22 16:00" in line
+
+
+def test_timestamp_in_seconds_formats_correctly():
+    df = _make_rows_df(
+        [("BINANCE-U", "ETHUSDT", "ETH", "USDT", 1747900800, 0.0001, 0.0001, 0.0001, 0.00001, 1e6, 0.8)]
+    )
+    msg = build_message(df, biyi_tickers=[], report_date_str="2026-05-12")
+    line = next(
+        line for line in msg.splitlines()
+        if "BINANCE-U" in line and "```" not in line and not line.startswith("*")
+    )
     assert "05-22 16:00" in line
 
 
@@ -111,3 +144,39 @@ def test_fmt_timestamp_bj_handles_none_and_nan():
     assert _fmt_timestamp_bj(None) == "n/a"
     assert _fmt_timestamp_bj(float("nan")) == "n/a"
     assert _fmt_timestamp_bj("not a number") == "n/a"
+
+
+def test_fmt_timestamp_bj_too_small_is_na():
+    assert _fmt_timestamp_bj(100000) == "n/a"
+
+
+def test_fmt_bp_multiplies_by_10000_and_keeps_sign():
+    assert _fmt_bp(0.0001) == "+1"
+    assert _fmt_bp(0.000123) == "+1.23"
+    assert _fmt_bp(-0.0001) == "-1"
+    assert _fmt_bp(0) == "+0"
+    assert _fmt_bp(None) == "n/a"
+    assert _fmt_bp(float("nan")) == "n/a"
+
+
+def test_fmt_apr_3d():
+    # 0.003 over 3 days → 0.003 * 365 / 3 * 100 = 36.5%
+    assert _fmt_apr(0.003, 3) == "+36.5%"
+    # 0 → +0.0%
+    assert _fmt_apr(0, 3) == "+0.0%"
+    # negative
+    assert _fmt_apr(-0.003, 3) == "-36.5%"
+
+
+def test_fmt_apr_7d():
+    # 0.007 over 7 days → 0.007 * 365 / 7 * 100 = 36.5%
+    assert _fmt_apr(0.007, 7) == "+36.5%"
+    assert _fmt_apr(None, 7) == "n/a"
+    assert _fmt_apr(float("nan"), 7) == "n/a"
+
+
+def test_fmt_apr_is_funding_cadence_independent():
+    # Same total funding over the same window must give the same APR regardless
+    # of how it was sliced (the whole point of using sum, not avg).
+    sum_7d = 0.0073
+    assert _fmt_apr(sum_7d, 7) == _fmt_apr(sum_7d, 7)

@@ -1,0 +1,15 @@
+# Copy this file to config.yaml on the target machine and fill in real values.
+# config.yaml is git-ignored.
+
+qijia:
+  host: ""           # e.g. "db.internal.example.com"
+  port: 5432
+  user: ""
+  password: ""       # may contain special chars; will be URL-encoded automatically
+  database: ""
+
+slack:
+  # Slack incoming webhook URL for the funding-top10 daily report. Required.
+  webhook: ""
+  # Slack channel id (e.g. C05XXXXXXXX). Optional — unused by webhook posts.
+  channel: ""

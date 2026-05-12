@@ -42,8 +42,14 @@ def _fmt_float(x, digits: int) -> str:
     return f"{xf:.{digits}f}"
 
 
-def _fmt_bp(x) -> str:
-    """raw × 10000, no fixed decimals (trailing zeros stripped, sign shown)."""
+def _fmt_bp(x, digits: int | None = None) -> str:
+    """raw × 10000, formatted as basis points (sign shown).
+
+    - digits=None (default): use ``:g`` — variable decimals, trailing zeros
+      stripped. Good for funding_rate where exact magnitude matters.
+    - digits=N: fixed N decimal places via ``:+.Nf``. Used for std_7d where a
+      stable column width is preferred.
+    """
     if x is None:
         return "n/a"
     try:
@@ -52,7 +58,10 @@ def _fmt_bp(x) -> str:
         return "n/a"
     if math.isnan(xf):
         return "n/a"
-    return f"{xf * 10000:+g}"
+    bp = xf * 10000
+    if digits is None:
+        return f"{bp:g}"
+    return f"{bp:.{digits}f}"
 
 
 def _fmt_apr(x, days: int) -> str:
@@ -69,7 +78,7 @@ def _fmt_apr(x, days: int) -> str:
         return "n/a"
     if math.isnan(xf):
         return "n/a"
-    return f"{xf * 365 / days * 100:+.1f}%"
+    return f"{xf * 365 / days * 100:.1f}%"
 
 
 def _fmt_human_usd(x) -> str:
@@ -159,10 +168,12 @@ def _row_line(row: pd.Series, biyi_set: set[str]) -> str:
     ticker = f"{base}/{quote}" if base is not None and quote is not None else ""
     flag = HIGHLIGHT if ticker in biyi_set else NO_FLAG
 
-    symbol_display = str(
-        row.get("base") if "base" in row and row.get("base") is not None
-        else row.get("symbol") or "n/a"
-    )[:16]
+    # symbol column shows the BASE/QUOTE pair (e.g. "BTC/USDT", "BTC/USDC"),
+    # not the raw exchange symbol code "BTCUSDT".
+    if base is not None and quote is not None:
+        symbol_display = ticker[:16]
+    else:
+        symbol_display = str(row.get("symbol") or "n/a")[:16]
 
     return _BODY_FMT.format(
         flag=flag,
@@ -172,7 +183,7 @@ def _row_line(row: pd.Series, biyi_set: set[str]) -> str:
         fr=_fmt_bp(row.get("funding_rate")),
         apr3=_fmt_apr(row.get("sum_3d_funding_rate"), 3),
         apr7=_fmt_apr(row.get("sum_7d_funding_rate"), 7),
-        s7=_fmt_bp(row.get("std_7d_funding_rate")),
+        s7=_fmt_bp(row.get("std_7d_funding_rate"), digits=3),
         oi=_fmt_human_usd(row.get("open_interest_value")),
         hc=_fmt_float(row.get("haircut"), 2),
     )

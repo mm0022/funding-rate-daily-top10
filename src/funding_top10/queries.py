@@ -23,18 +23,21 @@ group by exchange,symbol,base,"quote" ,settle
 )
 )
 -- funding rate 信息
--- 最新funding
+-- 最新funding：按每个 (exchange,symbol) 各自的最新 timestamp 取，避免被
+-- 全局 max(timestamp) 把那些 funding 周期不在最新一秒结算的币种过滤掉
+-- (BINANCE 现在 1h/4h/8h 周期混用，XAUT 等 8h 周期币种最容易被误杀)。
 , recent_funding as
 (
 select exchange,symbol,base,"quote" ,settle, "timestamp",funding_rate
 from funding_rate_data_original
-where ("timestamp")
+where (exchange,symbol,base,"quote" ,settle, "timestamp")
 in
 (
-select  max("timestamp") as recent_timestamp
+select exchange,symbol,base,"quote" ,settle, max("timestamp") as recent_timestamp
 from funding_rate_data_original
+where exchange = 'BINANCE-U'
+group by exchange,symbol,base,"quote" ,settle
 )
--- BINANCE-U only (per project scope)
 and exchange = 'BINANCE-U'
 )
 -- 过去3天 funding 总额（不取均值——这样跟 funding 周期无关）

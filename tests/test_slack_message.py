@@ -44,13 +44,13 @@ def test_biyi_rows_get_red_circle_flag():
         line for line in msg.splitlines()
         if "BINANCE-U" in line and "```" not in line and not line.startswith("*")
     ]
-    ena = next(line for line in code_lines if "ENA " in line and "ENA/USDT" not in line)
-    abc = next(line for line in code_lines if "ABC " in line)
+    ena = next(line for line in code_lines if "ENA/USDT" in line)
+    abc = next(line for line in code_lines if "ABC/USDT" in line)
     assert ena.startswith(HIGHLIGHT)
     assert abc.startswith(NO_FLAG)
 
 
-def test_symbol_column_shows_base_only():
+def test_symbol_column_shows_base_slash_quote():
     df = _make_rows_df(
         [("BINANCE-U", "1000FLOKIUSDT", "1000FLOKI", "USDT", 1747900800000, 0.0, 0.0, 0.0, 0.0, 1e6, 0.8)]
     )
@@ -59,8 +59,21 @@ def test_symbol_column_shows_base_only():
         line for line in msg.splitlines()
         if "BINANCE-U" in line and "```" not in line and not line.startswith("*")
     )
-    assert "1000FLOKI" in line
-    assert "1000FLOKIUSDT" not in line
+    assert "1000FLOKI/USDT" in line
+    # The raw concatenated symbol (no slash) should NOT appear in the table row
+    assert "1000FLOKIUSDT " not in line  # trailing space guards against substring of "1000FLOKI/USDT "
+
+
+def test_symbol_column_supports_non_usdt_quotes():
+    df = _make_rows_df(
+        [("BINANCE-U", "BTCUSDC", "BTC", "USDC", 1747900800000, 0.0, 0.0, 0.0, 0.0, 1e6, 0.8)]
+    )
+    msg = build_message(df, biyi_tickers=[], report_date_str="2026-05-12")
+    line = next(
+        line for line in msg.splitlines()
+        if "BINANCE-U" in line and "```" not in line and not line.startswith("*")
+    )
+    assert "BTC/USDC" in line
 
 
 def test_header_has_all_columns_plus_blank_flag():
@@ -150,27 +163,32 @@ def test_fmt_timestamp_bj_too_small_is_na():
     assert _fmt_timestamp_bj(100000) == "n/a"
 
 
-def test_fmt_bp_multiplies_by_10000_and_keeps_sign():
-    assert _fmt_bp(0.0001) == "+1"
-    assert _fmt_bp(0.000123) == "+1.23"
+def test_fmt_bp_multiplies_by_10000_signs_negatives_only():
+    assert _fmt_bp(0.0001) == "1"
+    assert _fmt_bp(0.000123) == "1.23"
     assert _fmt_bp(-0.0001) == "-1"
-    assert _fmt_bp(0) == "+0"
+    assert _fmt_bp(0) == "0"
     assert _fmt_bp(None) == "n/a"
     assert _fmt_bp(float("nan")) == "n/a"
 
 
+def test_fmt_bp_fixed_decimals():
+    assert _fmt_bp(0.0001, digits=3) == "1.000"
+    assert _fmt_bp(0.000005, digits=3) == "0.050"
+    assert _fmt_bp(-0.00003, digits=3) == "-0.300"
+    assert _fmt_bp(0, digits=3) == "0.000"
+
+
 def test_fmt_apr_3d():
     # 0.003 over 3 days → 0.003 * 365 / 3 * 100 = 36.5%
-    assert _fmt_apr(0.003, 3) == "+36.5%"
-    # 0 → +0.0%
-    assert _fmt_apr(0, 3) == "+0.0%"
-    # negative
+    assert _fmt_apr(0.003, 3) == "36.5%"
+    assert _fmt_apr(0, 3) == "0.0%"
     assert _fmt_apr(-0.003, 3) == "-36.5%"
 
 
 def test_fmt_apr_7d():
     # 0.007 over 7 days → 0.007 * 365 / 7 * 100 = 36.5%
-    assert _fmt_apr(0.007, 7) == "+36.5%"
+    assert _fmt_apr(0.007, 7) == "36.5%"
     assert _fmt_apr(None, 7) == "n/a"
     assert _fmt_apr(float("nan"), 7) == "n/a"
 

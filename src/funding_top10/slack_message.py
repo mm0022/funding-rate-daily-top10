@@ -197,7 +197,7 @@ def build_message(
     """Render the merged Top10 + biyi table for Slack."""
     biyi_set = set(biyi_tickers)
     lines: list[str] = [
-        f"*Funding Top 10 ∪ Biyi (BINANCE-U) — {report_date_str}*",
+        f"*Funding Top 20 ∪ Biyi (BINANCE-U) — {report_date_str}*",
         "```",
         _header_line(),
     ]

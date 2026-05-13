@@ -22,7 +22,7 @@ import pandas as pd
 
 
 TOP_X_BY_MEAN = 50
-TOP_N_FINAL = 10
+TOP_N_FINAL = 20
 MIN_HAIRCUT = 0.5
 
 

@@ -72,10 +72,13 @@ def main() -> int:
     )
     haircuts = load_binance_haircuts(datahub, tokens_to_fetch)
     logger.info("Got %d haircut values from DataHub", len(haircuts))
-    funding_df["haircut"] = funding_df["base"].astype(str).map(haircuts)
+    # Tokens DataHub doesn't return get haircut=0 (per user spec). This means
+    # they fail the haircut>=0.5 filter and are excluded from the top-N pool,
+    # but the value is still rendered as "0.00" in the table rather than "n/a".
+    funding_df["haircut"] = funding_df["base"].astype(str).map(haircuts).fillna(0.0)
 
     merged = select_rows_to_show(funding_df, biyi)
-    logger.info("Merged display set: %d rows (top10 haircut>=0.5 ∪ biyi)", len(merged))
+    logger.info("Merged display set: %d rows (top20 haircut>=0.5 ∪ biyi)", len(merged))
 
     today_beijing = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
     message = build_message(merged, biyi, report_date_str=today_beijing)

@@ -60,6 +60,62 @@ def test_extract_returns_none_for_unknown_shape():
     assert extract_haircut_value([{"unknown": 1}]) is None
 
 
+def test_extract_from_versioned_records_picks_latest_sample_time():
+    # Real shape returned by DataHub for BINANCE_MARGIN_ETHFI.HAIRCUT
+    value = [
+        {
+            "sample_time": 1778652000000,
+            "close_time": 1778655599999,
+            "start_time": 1778652000000,
+            "haircut": [{"left": 0, "right": 9999999999999, "value": 0.5}],
+            "symbol": "ETHFI",
+        },
+        {
+            "sample_time": 1778648400000,  # earlier
+            "close_time": 1778651999999,
+            "start_time": 1778648400000,
+            "haircut": [{"left": 0, "right": 9999999999999, "value": 0.6}],
+            "symbol": "ETHFI",
+        },
+    ]
+    # The latest record (sample_time 1778652000000) has value 0.5
+    assert extract_haircut_value(value) == 0.5
+
+
+def test_extract_from_versioned_records_picks_latest_when_order_reversed():
+    # Same as above but with earliest record first — exercise max() not first()
+    value = [
+        {
+            "sample_time": 1000,
+            "haircut": [{"left": 0, "right": 9999, "value": 0.3}],
+            "symbol": "X",
+        },
+        {
+            "sample_time": 2000,
+            "haircut": [{"left": 0, "right": 9999, "value": 0.7}],
+            "symbol": "X",
+        },
+    ]
+    assert extract_haircut_value(value) == 0.7
+
+
+def test_extract_from_single_record_with_tier_list():
+    # Same record-style but not wrapped in a list
+    value = {
+        "sample_time": 1778652000000,
+        "haircut": [{"left": 0, "right": 9999, "value": 0.42}],
+        "symbol": "BTC",
+    }
+    assert extract_haircut_value(value) == 0.42
+
+
+def test_extract_skips_record_with_empty_haircut_tiers():
+    value = [
+        {"sample_time": 1000, "haircut": []},
+    ]
+    assert extract_haircut_value(value) is None
+
+
 # ---- strip_denomination_prefix ----
 
 

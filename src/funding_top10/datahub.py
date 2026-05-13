@@ -54,16 +54,40 @@ def normalize_key(key: str, prefix: str) -> str:
 def extract_haircut_value(value: Any) -> float | None:
     """Best-effort extraction of a numeric haircut from whatever DataHub returns.
 
-    The exact JSON shape is not formally documented; this function copes with
-    several common forms:
-      - bare number: 0.95
-      - dict with one of {value, haircut, collateralRate, collateral_rate}
-      - list of such dicts (returns the first match)
-    Returns None when nothing convertible is found.
+    Forms handled, in priority order:
+
+    1. ``list[dict]`` of versioned records — each record carries a ``haircut``
+       list (the tier table) plus a timestamp (``sample_time`` / ``close_time``
+       / ``start_time``). We pick the record with the newest timestamp and
+       take ``haircut[0].value``. This is the shape DataHub returns for
+       ``BINANCE_MARGIN_<TOKEN>.HAIRCUT``::
+
+           [
+             {"sample_time": 1778652000000,
+              "haircut": [{"left": 0, "right": 9999..., "value": 0.5}],
+              "symbol": "ETHFI", ...},
+             ...
+           ]
+
+    2. ``dict`` with a ``haircut`` key whose value is a tier list — same idea
+       but unwrapped (single record, no versioning).
+    3. ``dict`` with a scalar key (``value`` / ``haircut`` / ``collateralRate``
+       / ``collateral_rate``).
+    4. bare number (int / float / numeric string).
+    5. generic list — recursively try each element.
+
+    Returns ``None`` when nothing convertible is found.
     """
+
     def _to_float(x: Any) -> float | None:
+        if isinstance(x, bool):
+            return None  # avoid True/False being coerced to 1.0/0.0
         if isinstance(x, (int, float)):
-            return float(x)
+            try:
+                f = float(x)
+            except (TypeError, ValueError):
+                return None
+            return None if f != f else f  # filter NaN
         if isinstance(x, str):
             try:
                 return float(x)
@@ -75,13 +99,36 @@ def extract_haircut_value(value: Any) -> float | None:
     if direct is not None:
         return direct
 
+    # Case 1: versioned record list
+    if isinstance(value, list) and value and isinstance(value[0], dict) and "haircut" in value[0]:
+        def _ts(entry: dict) -> int:
+            for k in ("sample_time", "close_time", "start_time"):
+                t = entry.get(k)
+                if isinstance(t, (int, float)):
+                    return int(t)
+            return 0
+
+        latest = max(value, key=_ts)
+        tiers = latest.get("haircut")
+        if isinstance(tiers, list) and tiers and isinstance(tiers[0], dict):
+            v = _to_float(tiers[0].get("value"))
+            if v is not None:
+                return v
+
+    # Case 2 / 3: dict
     if isinstance(value, dict):
+        tiers = value.get("haircut")
+        if isinstance(tiers, list) and tiers and isinstance(tiers[0], dict):
+            v = _to_float(tiers[0].get("value"))
+            if v is not None:
+                return v
         for k in ("value", "haircut", "collateralRate", "collateral_rate"):
             if k in value:
-                got = _to_float(value[k])
-                if got is not None:
-                    return got
+                v = _to_float(value[k])
+                if v is not None:
+                    return v
 
+    # Case 5: generic list — recurse
     if isinstance(value, list):
         for entry in value:
             got = extract_haircut_value(entry)

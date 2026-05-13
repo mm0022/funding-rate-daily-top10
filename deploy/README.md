@@ -11,6 +11,11 @@ python -m venv .venv
 .venv\Scripts\activate.bat
 pip install -r requirements.txt
 pip install -e .
+
+:: Install the internal nexus_data_hub_sdk from the alpha repo's vendor dir.
+:: Adjust the path to wherever alpha is checked out on this machine.
+pip install C:\path\to\alpha\vendor\nexus-data-hub-sdk
+
 copy config.yaml.example config.yaml
 notepad config.yaml
 ```
@@ -24,6 +29,8 @@ In `config.yaml`, fill in:
 - `qijia.host / port / user / password / database` — Postgres connection fields
 - `slack.webhook` — Slack incoming webhook URL
 - `slack.channel` — optional, leave empty unless you switch to file-upload mode later
+- `datahub.prefix / api_key / gateway_url` — for haircut data (defaults in config.yaml.example are tyo-prod)
+- `proxy` — corp proxy URL; leave empty if not needed
 
 ## 2. Smoke-run once manually
 

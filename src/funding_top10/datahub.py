@@ -40,9 +40,10 @@ DEFAULT_SDK_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".datahub_cache")
 # sorted by sample_time and the latest row is used.
 DEFAULT_HAIRCUT_LOOKBACK_DAYS = 90
 
-# Sentinel for the end_time: mirrors alpha's Constants.MAX_TIMESTAMP.
-# ~year 5138 — far beyond any real funding-rate event.
-_FAR_FUTURE_MS = 99_999_999_999_999
+# Sentinel for the end_time. Must match the SDK's Constants.MAX_TIMESTAMP
+# (13 digits, ~year 2286); passing a larger value gets silently filtered to
+# empty results.
+_FAR_FUTURE_MS = 9_999_999_999_999
 
 # Binance USDT-perp denomination prefixes: 1000, 10000, 100000, 1000000, ...
 # These are NOT part of the underlying token name (e.g. 1000FLOKI's haircut is

@@ -22,7 +22,7 @@ from funding_top10.binance_api import fetch_funding_dataframe  # noqa: E402
 from funding_top10.config import load_config  # noqa: E402
 from funding_top10.datahub import DataHub, load_binance_haircuts  # noqa: E402
 from funding_top10.queries import biyi_tickers_sql  # noqa: E402
-from funding_top10.scoring import TOP_X_BY_MEAN, select_rows_to_show  # noqa: E402
+from funding_top10.scoring import ScoreWeights, select_rows_to_show  # noqa: E402
 from funding_top10.slack_message import build_message, post_to_slack  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -51,17 +51,15 @@ def main() -> int:
     biyi = fetch_biyi_tickers(engine)
     logger.info("Got %d biyi tickers from DB (last 24h)", len(biyi))
 
-    # Haircut: only fetch for the tokens we'll actually display — top-X by
-    # sum_7d (the haircut-filter input) plus biyi tokens. Avoids hammering
-    # DataHub with 300+ requests when ~50 are enough.
-    top_x_tokens = set(
-        funding_df.nlargest(TOP_X_BY_MEAN, "sum_7d_funding_rate")["base"].astype(str).tolist()
-    )
+    # Haircut: query DataHub for ALL Binance USDT-perp bases + biyi. The new
+    # ranking by composite score needs every symbol's haircut (BTC/ETH have
+    # high haircut but low funding so a top-50-by-funding cut would miss them).
+    all_bases = set(funding_df["base"].astype(str).tolist())
     biyi_bases = {t.split("/")[0] for t in biyi if "/" in t}
-    tokens_to_fetch = sorted(top_x_tokens | biyi_bases)
+    tokens_to_fetch = sorted(all_bases | biyi_bases)
     logger.info(
-        "Fetching haircut for %d tokens from DataHub (top-%d ∪ biyi)…",
-        len(tokens_to_fetch), TOP_X_BY_MEAN,
+        "Fetching haircut for %d tokens from DataHub (all bases ∪ biyi)…",
+        len(tokens_to_fetch),
     )
     datahub = DataHub(
         prefix=cfg.datahub.prefix,
@@ -87,8 +85,18 @@ def main() -> int:
             biyi_base, in_dict, in_row,
         )
 
-    merged = select_rows_to_show(funding_df, biyi)
-    logger.info("Merged display set: %d rows (top20 haircut>=0.5 ∪ biyi)", len(merged))
+    weights = ScoreWeights(
+        apr7=cfg.score_weights.apr7,
+        std=cfg.score_weights.std,
+        haircut=cfg.score_weights.haircut,
+        oi=cfg.score_weights.oi,
+    )
+    logger.info(
+        "Composite score weights: apr7=%.2f std=%.2f haircut=%.2f oi=%.2f",
+        weights.apr7, weights.std, weights.haircut, weights.oi,
+    )
+    merged = select_rows_to_show(funding_df, biyi, weights)
+    logger.info("Merged display set: %d rows (top by score ∪ biyi)", len(merged))
 
     today_beijing = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
     message = build_message(merged, biyi, report_date_str=today_beijing)

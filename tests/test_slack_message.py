@@ -80,7 +80,7 @@ def test_header_has_all_columns_plus_blank_flag():
     df = _make_rows_df([])
     msg = build_message(df, biyi_tickers=[], report_date_str="2026-05-12")
     header = next(line for line in msg.splitlines() if "exchange" in line and "symbol" in line)
-    for col in ["exchange", "symbol", "timestamp", "funding(bp)", "3d_apr%", "7d_apr%", "std_7d(bp)", "OI", "haircut"]:
+    for col in ["exchange", "symbol", "timestamp", "int", "funding(bp)", "3d_apr%", "7d_apr%", "std_7d_y%", "OI", "haircut", "score"]:
         assert col in header, f"missing column header: {col}"
     assert header.index("exchange") == 3
 

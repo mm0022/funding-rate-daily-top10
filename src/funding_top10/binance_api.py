@@ -63,6 +63,26 @@ async def fetch_active_usdt_perps(client: httpx.AsyncClient) -> set[str]:
     }
 
 
+DEFAULT_FUNDING_INTERVAL_HOURS = 8
+
+
+async def fetch_funding_intervals(client: httpx.AsyncClient) -> dict[str, int]:
+    """Return {symbol: hours} for perps whose funding interval ISN'T the default 8h.
+
+    Binance only lists symbols with non-default intervals in /fapi/v1/fundingInfo.
+    Symbols absent from the response use the default 8h. Caller should treat
+    a missing key as DEFAULT_FUNDING_INTERVAL_HOURS.
+    """
+    rows = await _get_json(client, f"{FAPI_BASE}/fapi/v1/fundingInfo")
+    out: dict[str, int] = {}
+    for r in rows or []:
+        try:
+            out[str(r["symbol"])] = int(r["fundingIntervalHours"])
+        except (TypeError, ValueError, KeyError):
+            continue
+    return out
+
+
 async def fetch_funding_history(client: httpx.AsyncClient, symbol: str,
                                 *, days: int = 7) -> list[dict]:
     """Past `days` of funding events for one symbol. limit=1000 covers any cadence."""
@@ -127,6 +147,11 @@ async def _fetch_all_async(proxy: str = "") -> pd.DataFrame:
         # waste calls on delisted / pre-trading / settling entries.
         active_symbols = await fetch_active_usdt_perps(client)
         logger.info("BINANCE-U active USDT perps: %d", len(active_symbols))
+
+        # Phase 0b: per-symbol funding cadence overrides (default 8h applies
+        # to anything absent from the response).
+        interval_overrides = await fetch_funding_intervals(client)
+        logger.info("BINANCE-U non-default funding intervals: %d", len(interval_overrides))
 
         premium = await fetch_premium_index_all(client)
         usdt_rows = [
@@ -217,6 +242,7 @@ async def _fetch_all_async(proxy: str = "") -> pd.DataFrame:
             "sum_3d_funding_rate": sum_3d if rates_7d or sum_3d else float("nan"),
             "sum_7d_funding_rate": sum_7d if rates_7d else float("nan"),
             "std_7d_funding_rate": std_7d,
+            "funding_interval_hours": interval_overrides.get(symbol, DEFAULT_FUNDING_INTERVAL_HOURS),
             "open_interest_value": oi_value,
             "haircut": float("nan"),  # populated later from DataHub in main.py
         })

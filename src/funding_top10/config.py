@@ -47,10 +47,19 @@ class DataHubConfig:
 
 
 @dataclass(frozen=True)
+class ScoreWeightsConfig:
+    apr7: float          # 7d_apr% (higher is better)
+    std: float           # annualized std (lower is better — applied as inverted rank)
+    haircut: float       # haircut (higher is better)
+    oi: float            # open interest USD (higher is better)
+
+
+@dataclass(frozen=True)
 class Config:
     qijia: QijiaConfig
     slack: SlackConfig
     datahub: DataHubConfig
+    score_weights: ScoreWeightsConfig
     proxy: str  # full URL, e.g. "http://proxy.host:8080"; empty disables proxy
 
 
@@ -76,6 +85,7 @@ def load_config(path: Path | None = None) -> Config:
     qijia_raw = raw.get("qijia") or {}
     slack_raw = raw.get("slack") or {}
     datahub_raw = raw.get("datahub") or {}
+    score_raw = raw.get("score_weights") or {}
     proxy_raw = raw.get("proxy") or ""
 
     missing_qijia = [k for k in _REQUIRED_QIJIA if not qijia_raw.get(k)]
@@ -104,6 +114,12 @@ def load_config(path: Path | None = None) -> Config:
             api_key=str(datahub_raw.get("api_key") or ""),
             gateway_url=str(datahub_raw.get("gateway_url") or ""),
             cache_dir=str(datahub_raw.get("cache_dir") or ""),
+        ),
+        score_weights=ScoreWeightsConfig(
+            apr7=float(score_raw.get("apr7", 0.4)),
+            std=float(score_raw.get("std", 0.2)),
+            haircut=float(score_raw.get("haircut", 0.2)),
+            oi=float(score_raw.get("oi", 0.2)),
         ),
         proxy=str(proxy_raw or ""),
     )

@@ -25,6 +25,16 @@ datahub:
   # a folder you know is writable, e.g. "C:\\Users\\you\\Documents\\dhcache".
   cache_dir: ""
 
+# Composite score weights. Each metric is converted to a 0..1 percentile rank
+# (std is inverted — lower std = higher contribution). Final score = weighted
+# sum. Weights don't have to sum to 1 — they're relative. Rows are sorted by
+# score descending and the top N is taken.
+score_weights:
+  apr7: 0.40        # 7d_apr% (higher = more funding income)
+  std: 0.20         # std_7d annualized (lower = more stable)
+  haircut: 0.20     # haircut (higher = more capital-efficient)
+  oi: 0.20          # open interest USD (higher = more liquid)
+
 # HTTP/HTTPS proxy URL used for BOTH the Binance API calls and the Slack webhook
 # POST (any outbound HTTP). Internal DataHub gateway and DB do NOT go through
 # this (they're internal). Empty string = no proxy.

@@ -141,9 +141,44 @@ def _fmt_timestamp_bj(ts) -> str:
         return "n/a"
 
 
+def _fmt_pct_value(x, digits: int = 1) -> str:
+    """Format a decimal as +/-X.X% (e.g. 0.123 -> '12.3%'). Negatives carry '-'."""
+    if x is None:
+        return "n/a"
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return "n/a"
+    if math.isnan(xf):
+        return "n/a"
+    return f"{xf * 100:.{digits}f}%"
+
+
+def _fmt_score(x) -> str:
+    if x is None:
+        return "n/a"
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return "n/a"
+    if math.isnan(xf):
+        return "n/a"
+    return f"{xf:.3f}"
+
+
+def _fmt_interval(h) -> str:
+    if h is None:
+        return "n/a"
+    try:
+        hi = int(h)
+    except (TypeError, ValueError):
+        return "n/a"
+    return f"{hi}h"
+
+
 _BODY_FMT = (
-    "{flag}{exchange:<10s} {symbol:<16s} {ts:<11s} "
-    "{fr:>11s} {apr3:>9s} {apr7:>9s} {s7:>12s} {oi:>12s} {hc:>10s}"
+    "{flag}{exchange:<10s} {symbol:<16s} {ts:<11s} {fint:>4s} "
+    "{fr:>11s} {apr3:>9s} {apr7:>9s} {sy:>11s} {oi:>12s} {hc:>9s} {sc:>7s}"
 )
 
 
@@ -153,12 +188,14 @@ def _header_line() -> str:
         exchange="exchange",
         symbol="symbol",
         ts="timestamp",
+        fint="int",
         fr="funding(bp)",
         apr3="3d_apr%",
         apr7="7d_apr%",
-        s7="std_7d(bp)",
+        sy="std_7d_y%",
         oi="OI",
         hc="haircut",
+        sc="score",
     )
 
 
@@ -168,8 +205,6 @@ def _row_line(row: pd.Series, biyi_set: set[str]) -> str:
     ticker = f"{base}/{quote}" if base is not None and quote is not None else ""
     flag = HIGHLIGHT if ticker in biyi_set else NO_FLAG
 
-    # symbol column shows the BASE/QUOTE pair (e.g. "BTC/USDT", "BTC/USDC"),
-    # not the raw exchange symbol code "BTCUSDT".
     if base is not None and quote is not None:
         symbol_display = ticker[:16]
     else:
@@ -180,12 +215,14 @@ def _row_line(row: pd.Series, biyi_set: set[str]) -> str:
         exchange=str(row.get("exchange") or "n/a")[:10],
         symbol=symbol_display,
         ts=_fmt_timestamp_bj(row.get("timestamp")),
+        fint=_fmt_interval(row.get("funding_interval_hours")),
         fr=_fmt_bp(row.get("funding_rate")),
         apr3=_fmt_apr(row.get("sum_3d_funding_rate"), 3),
         apr7=_fmt_apr(row.get("sum_7d_funding_rate"), 7),
-        s7=_fmt_bp(row.get("std_7d_funding_rate"), digits=3),
+        sy=_fmt_pct_value(row.get("std_7d_annualized"), 1),
         oi=_fmt_human_usd(row.get("open_interest_value")),
         hc=_fmt_float(row.get("haircut"), 2),
+        sc=_fmt_score(row.get("score")),
     )
 
 
@@ -197,7 +234,7 @@ def build_message(
     """Render the merged Top10 + biyi table for Slack."""
     biyi_set = set(biyi_tickers)
     lines: list[str] = [
-        f"*Funding Top 20 ∪ Biyi (BINANCE-U) — {report_date_str}*",
+        f"*Funding Score Top N ∪ Biyi (BINANCE-U) — {report_date_str}*",
         "```",
         _header_line(),
     ]

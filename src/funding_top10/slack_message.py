@@ -143,7 +143,7 @@ def _fmt_timestamp_bj(ts) -> str:
 
 _BODY_FMT = (
     "{flag}{exchange:<10s} {symbol:<16s} {ts:<11s} "
-    "{fr:>11s} {apr3:>9s} {apr7:>9s} {s7:>10s} {oi:>8s} {hc:>8s}"
+    "{fr:>11s} {apr3:>9s} {apr7:>9s} {s7:>10s} {oi:>12s} {hc:>10s}"
 )
 
 

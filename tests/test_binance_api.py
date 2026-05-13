@@ -3,16 +3,12 @@
 The HTTP layer is left to manual / smoke testing against the live Binance API.
 """
 
-import hashlib
-import hmac
-
 import pytest
 
 from funding_top10.binance_api import (
     _aggregate,
     _base_from_symbol,
     _is_usdt_perp,
-    _sign,
 )
 
 
@@ -70,6 +66,3 @@ def test_aggregate_empty_history():
     assert rates == []
 
 
-def test_sign_matches_hmac_sha256_reference():
-    expected = hmac.new(b"my_secret", b"timestamp=1234", hashlib.sha256).hexdigest()
-    assert _sign("timestamp=1234", "my_secret") == expected

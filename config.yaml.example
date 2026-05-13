@@ -14,12 +14,6 @@ slack:
   # Slack channel id (e.g. C05XXXXXXXX). Optional — unused by webhook posts.
   channel: ""
 
-binance:
-  # Reserved for future signed Binance endpoints. The haircut column is now
-  # sourced from DataHub (below), so these are not currently used.
-  api_key: ""
-  api_secret: ""
-
 datahub:
   # All three required for haircut lookups. The SDK is installed separately
   # from the alpha repo's vendor dir (see deploy/README).

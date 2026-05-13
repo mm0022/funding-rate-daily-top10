@@ -39,12 +39,6 @@ class SlackConfig:
 
 
 @dataclass(frozen=True)
-class BinanceConfig:
-    api_key: str
-    api_secret: str
-
-
-@dataclass(frozen=True)
 class DataHubConfig:
     prefix: str          # e.g. "CYBERX_PROD"
     api_key: str
@@ -55,7 +49,6 @@ class DataHubConfig:
 class Config:
     qijia: QijiaConfig
     slack: SlackConfig
-    binance: BinanceConfig
     datahub: DataHubConfig
     proxy: str  # full URL, e.g. "http://proxy.host:8080"; empty disables proxy
 
@@ -81,7 +74,6 @@ def load_config(path: Path | None = None) -> Config:
 
     qijia_raw = raw.get("qijia") or {}
     slack_raw = raw.get("slack") or {}
-    binance_raw = raw.get("binance") or {}
     datahub_raw = raw.get("datahub") or {}
     proxy_raw = raw.get("proxy") or ""
 
@@ -105,10 +97,6 @@ def load_config(path: Path | None = None) -> Config:
         slack=SlackConfig(
             webhook=str(slack_raw["webhook"]),
             channel=str(slack_raw.get("channel") or ""),
-        ),
-        binance=BinanceConfig(
-            api_key=str(binance_raw.get("api_key") or ""),
-            api_secret=str(binance_raw.get("api_secret") or ""),
         ),
         datahub=DataHubConfig(
             prefix=str(datahub_raw.get("prefix") or ""),

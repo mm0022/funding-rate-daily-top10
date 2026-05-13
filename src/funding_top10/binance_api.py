@@ -1,29 +1,27 @@
 """Binance API client for the funding-top10 report.
 
-Endpoints used (all USDT-quoted BINANCE-U perps):
-  - GET  /fapi/v1/premiumIndex            (public): latest funding + mark price for ALL perps
-  - GET  /fapi/v1/fundingRate?symbol=X    (public): 7-day funding history for sum/std
-  - GET  /fapi/v1/openInterest?symbol=X   (public): current OI in base units
-  - GET  /sapi/v1/portfolio/collateralRate (signed): per-asset collateral rate ("haircut")
+Endpoints used (all public, no auth — all USDT-quoted BINANCE-U perps):
+  - GET  /fapi/v1/premiumIndex          : latest funding + mark price for ALL perps
+  - GET  /fapi/v1/fundingRate?symbol=X  : 7-day funding history for sum/std
+  - GET  /fapi/v1/openInterest?symbol=X : current OI in base units
+
+Haircut data is NOT fetched here — it now comes from DataHub (see datahub.py).
 
 Returns a DataFrame matching the historical SQL schema so downstream scoring /
 slack_message code stays identical:
   exchange, symbol, base, quote, timestamp, funding_rate,
   sum_3d_funding_rate, sum_7d_funding_rate, std_7d_funding_rate,
-  open_interest_value, haircut
+  open_interest_value, haircut (always NaN here; populated later from DataHub)
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import logging
 import math
 import statistics
 import time
 from typing import Any
-from urllib.parse import urlencode
 
 import httpx
 import pandas as pd
@@ -32,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 
 FAPI_BASE = "https://fapi.binance.com"
-SAPI_BASE = "https://api.binance.com"
 
 MAX_CONCURRENCY = 5  # was 30; lowered after Binance returned 403s for rate violation
 HTTP_TIMEOUT = 30.0
@@ -70,48 +67,6 @@ async def fetch_open_interest(client: httpx.AsyncClient, symbol: str) -> dict:
     )
 
 
-def _sign(query_string: str, secret: str) -> str:
-    return hmac.new(secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-async def fetch_collateral_rates(client: httpx.AsyncClient, api_key: str,
-                                 api_secret: str) -> list[dict]:
-    """All-asset collateral rates from Portfolio Margin sapi. Signed."""
-    params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
-    qs = urlencode(params)
-    sig = _sign(qs, api_secret)
-    url = f"{SAPI_BASE}/sapi/v1/portfolio/collateralRate?{qs}&signature={sig}"
-    return await _get_json(client, url, headers={"X-MBX-APIKEY": api_key})
-
-
-async def fetch_collateral_rates_safe(client: httpx.AsyncClient, api_key: str,
-                                      api_secret: str) -> list[dict]:
-    """Fetch collateral rates; on failure log a warning + Binance's response
-    body and return [] so the rest of the report can still be produced.
-
-    Common reasons this fails:
-      - account is not Portfolio Margin enabled (this endpoint is PM-only)
-      - API key lacks required permissions
-      - server clock skew (timestamp outside recvWindow)
-      - signature error
-    """
-    if not api_key or not api_secret:
-        return []
-    try:
-        return await fetch_collateral_rates(client, api_key, api_secret)
-    except httpx.HTTPStatusError as e:
-        body = e.response.text[:1000] if e.response is not None else ""
-        status = e.response.status_code if e.response is not None else "?"
-        logger.warning(
-            "collateralRate fetch failed: HTTP %s — %s. haircut column will be NaN.",
-            status, body,
-        )
-        return []
-    except Exception as e:  # noqa: BLE001
-        logger.warning("collateralRate fetch failed: %s. haircut column will be NaN.", e)
-        return []
-
-
 def _is_usdt_perp(symbol: str) -> bool:
     """USDT-quoted perp like BTCUSDT, ENAUSDT, 1000FLOKIUSDT. Excludes USDC/BUSD/etc."""
     return symbol.endswith("USDT")
@@ -137,7 +92,7 @@ def _aggregate(history: list[dict], *, now_ms: int, days: int) -> tuple[float, l
     return (sum(rates), rates)
 
 
-async def _fetch_all_async(api_key: str, api_secret: str, proxy: str = "") -> pd.DataFrame:
+async def _fetch_all_async(proxy: str = "") -> pd.DataFrame:
     sem = asyncio.Semaphore(MAX_CONCURRENCY)
 
     async def bounded(coro):
@@ -159,25 +114,11 @@ async def _fetch_all_async(api_key: str, api_secret: str, proxy: str = "") -> pd
         history_coros = [bounded(fetch_funding_history(client, s, days=7)) for s in symbols]
         oi_coros = [bounded(fetch_open_interest(client, s)) for s in symbols]
 
-        # Note: haircut is sourced from DataHub now (see funding_top10/datahub.py),
-        # not from Binance's /sapi/v1/portfolio/collateralRate. api_key / api_secret
-        # are kept on the function signature for forward-compat but unused here.
-        del api_key, api_secret
-
         histories, ois = await asyncio.gather(
             asyncio.gather(*history_coros, return_exceptions=True),
             asyncio.gather(*oi_coros, return_exceptions=True),
             return_exceptions=False,
         )
-        collat: list[dict] = []
-
-    haircut_map: dict[str, float] = {}
-    if isinstance(collat, list):
-        for row in collat:
-            try:
-                haircut_map[str(row["asset"])] = float(row["collateralRate"])
-            except (TypeError, ValueError, KeyError):
-                continue
 
     now_ms = int(time.time() * 1000)
     rows: list[dict] = []
@@ -240,19 +181,19 @@ async def _fetch_all_async(api_key: str, api_secret: str, proxy: str = "") -> pd
             "sum_7d_funding_rate": sum_7d if rates_7d else float("nan"),
             "std_7d_funding_rate": std_7d,
             "open_interest_value": oi_value,
-            "haircut": haircut_map.get(base, float("nan")),
+            "haircut": float("nan"),  # populated later from DataHub in main.py
         })
 
     return pd.DataFrame(rows)
 
 
-def fetch_funding_dataframe(api_key: str, api_secret: str, proxy: str = "") -> pd.DataFrame:
-    """Sync entrypoint: fetch all Binance data and return the DataFrame.
-
-    api_key / api_secret may be empty; in that case the haircut column is all NaN
-    (only the signed collateralRate endpoint needs auth).
+def fetch_funding_dataframe(proxy: str = "") -> pd.DataFrame:
+    """Sync entrypoint: fetch funding/OI from Binance and return the DataFrame.
 
     proxy: if non-empty, all HTTP calls route through this URL (e.g.
     "http://proxy.company.com:8080"). If empty, calls go direct.
+
+    The 'haircut' column on the returned DataFrame is always NaN; populate it
+    from DataHub in the caller (see funding_top10/datahub.load_binance_haircuts).
     """
-    return asyncio.run(_fetch_all_async(api_key, api_secret, proxy))
+    return asyncio.run(_fetch_all_async(proxy))

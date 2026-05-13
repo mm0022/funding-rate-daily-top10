@@ -42,9 +42,7 @@ def main() -> int:
     proxy_repr = cfg.proxy or "(none)"
 
     logger.info("Fetching funding/OI from Binance API (proxy=%s)…", proxy_repr)
-    funding_df = fetch_funding_dataframe(
-        cfg.binance.api_key, cfg.binance.api_secret, proxy=cfg.proxy
-    )
+    funding_df = fetch_funding_dataframe(proxy=cfg.proxy)
     logger.info("Got %d BINANCE-U USDT-perp rows from Binance API", len(funding_df))
 
     # DB uses psycopg2 — it doesn't consult HTTP_PROXY env vars at all. We pass

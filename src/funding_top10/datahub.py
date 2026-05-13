@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 # least one sample under normal conditions.
 DEFAULT_HAIRCUT_LOOKBACK_HOURS = 24
 
+# Sentinel for the backfill retry: mirrors alpha's Constants.MAX_TIMESTAMP.
+# ~year 5138 — far beyond any real funding-rate event.
+_FAR_FUTURE_MS = 99_999_999_999_999
+
 # Binance USDT-perp denomination prefixes: 1000, 10000, 100000, 1000000, ...
 # These are NOT part of the underlying token name (e.g. 1000FLOKI's haircut is
 # FLOKI's haircut). Single-zero / no-zero leading "1" tokens like 1INCH are
@@ -198,20 +202,24 @@ class DataHub:
                            *, lookback_hours: int = DEFAULT_HAIRCUT_LOOKBACK_HOURS) -> float | None:
         """Fetch the latest haircut for a market-data symbol.
 
-        The underlying call is the same as alpha's
-        ``DataHubClient.market_data_request(symbol, start_time, end_time)`` —
-        the SDK's ``Client.request`` method, which targets the market-data
-        time-series store. No prefix is applied (the SDK handles routing).
+        Mirrors alpha's ``DataHubClient.market_data_request(..., is_backfill=True)``:
+          1. Request the [now - lookback, now] window.
+          2. If empty, retry with the same start_time but end_time pushed to
+             far future — this is what makes the SDK actually return the most
+             recent samples regardless of how stale they are.
+        Then take the latest row's first-tier ``value``.
 
-        The returned ``HubData.data`` is a DataFrame with one row per sample
-        time, columns including ``sample_time`` and ``haircut`` (a list of
-        tier dicts). We take the latest row's first tier's ``value``.
-
-        Returns ``None`` when no rows are in the lookback window.
+        Returns ``None`` when both requests come back empty.
         """
         end_ms = int(time.time() * 1000)
         start_ms = end_ms - lookback_hours * 3600 * 1000
+
         hub_data = self._client.request(symbol, start_time=start_ms, end_time=end_ms)
+        if hub_data.data is None or hub_data.data.empty:
+            hub_data = self._client.request(
+                symbol, start_time=start_ms, end_time=_FAR_FUTURE_MS,
+            )
+
         return parse_haircut_from_market_data_df(hub_data.data)
 
 

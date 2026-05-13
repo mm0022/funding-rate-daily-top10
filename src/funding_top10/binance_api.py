@@ -47,6 +47,22 @@ async def fetch_premium_index_all(client: httpx.AsyncClient) -> list[dict]:
     return await _get_json(client, f"{FAPI_BASE}/fapi/v1/premiumIndex")
 
 
+async def fetch_active_usdt_perps(client: httpx.AsyncClient) -> set[str]:
+    """Return the set of BINANCE-U symbols that are TRADING + PERPETUAL + USDT-quoted.
+
+    Symbols in any other state (PRE_TRADING / BREAK / SETTLING / delisted) tend
+    to return 4xx on /fundingRate or /openInterest — better to skip them upfront.
+    """
+    info = await _get_json(client, f"{FAPI_BASE}/fapi/v1/exchangeInfo")
+    return {
+        str(s.get("symbol"))
+        for s in info.get("symbols", [])
+        if s.get("status") == "TRADING"
+        and s.get("contractType") == "PERPETUAL"
+        and s.get("quoteAsset") == "USDT"
+    }
+
+
 async def fetch_funding_history(client: httpx.AsyncClient, symbol: str,
                                 *, days: int = 7) -> list[dict]:
     """Past `days` of funding events for one symbol. limit=1000 covers any cadence."""
@@ -107,8 +123,16 @@ async def _fetch_all_async(proxy: str = "") -> pd.DataFrame:
         client_kwargs["proxy"] = proxy
 
     async with httpx.AsyncClient(**client_kwargs) as client:
+        # Phase 0: get the set of actively-trading USDT-perp symbols so we don't
+        # waste calls on delisted / pre-trading / settling entries.
+        active_symbols = await fetch_active_usdt_perps(client)
+        logger.info("BINANCE-U active USDT perps: %d", len(active_symbols))
+
         premium = await fetch_premium_index_all(client)
-        usdt_rows = [p for p in premium if _is_usdt_perp(str(p.get("symbol", "")))]
+        usdt_rows = [
+            p for p in premium
+            if str(p.get("symbol", "")) in active_symbols
+        ]
         symbols = [p["symbol"] for p in usdt_rows]
 
         # Phase 1: per-symbol funding history.

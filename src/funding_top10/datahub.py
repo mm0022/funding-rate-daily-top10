@@ -199,16 +199,30 @@ def load_binance_haircuts(datahub: DataHub, tokens: list[str]) -> dict[str, floa
             skipped_non_ascii += 1
             continue
 
-        underlying = strip_denomination_prefix(token)
-        key = f"BINANCE_MARGIN_{underlying}.HAIRCUT"
-        try:
-            raw = datahub.load_value(key)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("haircut fetch for %s (key=%s) failed: %s", token, key, e)
-            continue
+        # Try the perp base name first (e.g. '1000FLOKI'), then the underlying
+        # token (e.g. 'FLOKI'). alpha appears to upload haircut data under both
+        # conventions for different tokens, so we don't have to guess.
+        candidates = [token]
+        stripped = strip_denomination_prefix(token)
+        if stripped and stripped != token:
+            candidates.append(stripped)
+
+        raw = None
+        used_key: str | None = None
+        for candidate in candidates:
+            key = f"BINANCE_MARGIN_{candidate}.HAIRCUT"
+            try:
+                raw = datahub.load_value(key)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("haircut fetch for %s (key=%s) failed: %s", token, key, e)
+                raw = None
+                continue
+            if raw is not None:
+                used_key = key
+                break
 
         if diag_budget > 0:
-            logger.info("haircut diag — token=%s key=%s raw=%r", token, key, raw)
+            logger.info("haircut diag — token=%s used_key=%s raw=%r", token, used_key, raw)
             diag_budget -= 1
 
         if raw is None:
@@ -218,7 +232,7 @@ def load_binance_haircuts(datahub: DataHub, tokens: list[str]) -> dict[str, floa
         if parsed is not None:
             haircuts[token] = parsed
         else:
-            logger.warning("haircut for %s (key=%s) has unrecognised shape: %r", token, key, raw)
+            logger.warning("haircut for %s (key=%s) has unrecognised shape: %r", token, used_key, raw)
 
     if skipped_non_ascii:
         logger.info("Skipped %d non-ASCII token(s) (no DataHub haircut for those)", skipped_non_ascii)

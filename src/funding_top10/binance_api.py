@@ -186,8 +186,12 @@ async def _fetch_all_async(api_key: str, api_secret: str, proxy: str = "") -> pd
         base = _base_from_symbol(symbol)
 
         if isinstance(history, Exception):
+            logger.warning("funding history fetch for %s failed: %r", symbol, history)
             history = []
+        elif not history:
+            logger.info("funding history for %s returned empty list (likely recently-listed)", symbol)
         if isinstance(oi, Exception):
+            logger.warning("openInterest fetch for %s failed: %r", symbol, oi)
             oi = {}
 
         try:

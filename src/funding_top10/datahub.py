@@ -308,79 +308,72 @@ def parse_haircut_from_market_data_df(df: Any) -> float | None:
     return None
 
 
-def load_binance_haircuts(datahub: DataHub, tokens: list[str]) -> dict[str, float]:
-    """Fetch the haircut for each ASCII token in `tokens`.
+def load_binance_haircuts(datahub: DataHub, tokens: list[str],
+                          *, max_workers: int = 10) -> dict[str, float]:
+    """Fetch the haircut for each ASCII token in `tokens` in parallel.
 
     Each token is the perp base symbol (e.g. '1000FLOKI'). We strip Binance's
     denomination prefix (so '1000FLOKI' → 'FLOKI') before forming the DataHub
     key. The returned dict keys are the ORIGINAL token names so the caller can
     map directly from funding_df['base'].
 
-    Tokens with non-ASCII characters (e.g. Chinese meme-coin names) are skipped
-    silently — DataHub does not store haircuts for them and querying just
-    pollutes the log.
+    Tokens with non-ASCII characters are skipped silently.
 
-    For the first few tokens we log the raw DataHub return value at INFO level
-    so we can diagnose key-format / value-shape problems.
+    Concurrency: ``max_workers`` threads share the single DataHub SDK client.
+    httpx.Client (the SDK's transport) is documented thread-safe; the patched
+    FileHelper.move_file uses os.replace which is atomic on Windows. ~500
+    tokens at 10 workers takes ~10 seconds vs ~90 sequential.
     """
-    haircuts: dict[str, float] = {}
-    skipped_non_ascii = 0
-    queried = 0
-    not_found: list[str] = []
-    diag_budget = 3
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
 
-    for token in tokens:
-        if not token.isascii():
-            skipped_non_ascii += 1
-            continue
-
-        # Try the perp base name first (e.g. '1000FLOKI'), then the underlying
-        # token (e.g. 'FLOKI'). alpha uploads haircut data under both
-        # conventions for different tokens, so we don't have to guess.
+    def _fetch_one(token: str) -> tuple[str, str | None, float | None]:
+        """Return (token, used_symbol, value). value=None if no data / errored."""
         candidates = [token]
         stripped = strip_denomination_prefix(token)
         if stripped and stripped != token:
             candidates.append(stripped)
-
-        value: float | None = None
-        used_symbol: str | None = None
         for candidate in candidates:
             symbol = f"BINANCE_MARGIN_{candidate}.HAIRCUT"
             try:
-                value = datahub.load_haircut_value(symbol)
+                v = datahub.load_haircut_value(symbol)
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "haircut fetch for %s (symbol=%s) failed: %s",
                     token, symbol, e,
                 )
-                value = None
                 continue
-            if value is not None:
-                used_symbol = symbol
-                break
+            if v is not None:
+                return token, symbol, v
+        return token, None, None
 
-        queried += 1
-        if diag_budget > 0:
+    ascii_tokens = [t for t in tokens if t.isascii()]
+    skipped_non_ascii = len(tokens) - len(ascii_tokens)
+
+    haircuts: dict[str, float] = {}
+    not_found: list[str] = []
+    diag_budget = 3
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for token, used_symbol, value in executor.map(_fetch_one, ascii_tokens):
+            if diag_budget > 0:
+                logger.info(
+                    "haircut diag — token=%s used_symbol=%s value=%s",
+                    token, used_symbol, value,
+                )
+                diag_budget -= 1
+            if value is None:
+                not_found.append(token)
+                continue
+            haircuts[token] = value
             logger.info(
-                "haircut diag — token=%s used_symbol=%s value=%s",
+                "haircut found — token=%s symbol=%s value=%s",
                 token, used_symbol, value,
             )
-            diag_budget -= 1
-
-        if value is None:
-            not_found.append(token)
-            continue
-
-        haircuts[token] = value
-        logger.info(
-            "haircut found — token=%s symbol=%s value=%s",
-            token, used_symbol, value,
-        )
 
     if skipped_non_ascii:
         logger.info("Skipped %d non-ASCII token(s) (no DataHub haircut for those)", skipped_non_ascii)
     logger.info(
         "haircut summary: %d/%d queried tokens had data; not-found=%r",
-        len(haircuts), queried, not_found[:20],
+        len(haircuts), len(ascii_tokens), not_found[:20],
     )
     return haircuts

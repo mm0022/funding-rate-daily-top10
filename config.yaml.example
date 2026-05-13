@@ -1,12 +1,21 @@
 # Copy this file to config.yaml on the target machine and fill in real values.
 # config.yaml is git-ignored.
 
+# qijia DB is no longer used (biyi moved to API). Section kept for backward
+# compatibility with older configs; safe to delete.
 qijia:
-  host: ""           # e.g. "db.internal.example.com"
+  host: ""
   port: 5432
   user: ""
-  password: ""       # may contain special chars; will be URL-encoded automatically
+  password: ""
   database: ""
+
+biyi:
+  # Internal biyi strategy API base URL. /strategies/list is the endpoint.
+  base_url: "https://biyi.tky.laozi.pro/biyi/api"
+  # Free-form filter query passed to the API. Empty = return all strategies.
+  # Example: "strategyName like 'LONGSHORT_BINANCE%'"
+  query: ""
 
 slack:
   # Slack incoming webhook URL for the funding-top10 daily report. Required.

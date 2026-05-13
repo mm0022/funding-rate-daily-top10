@@ -55,7 +55,8 @@ slack:
     assert dsn.count("@") == 1
 
 
-def test_missing_qijia_field_raises(tmp_path):
+def test_missing_qijia_field_no_longer_raises(tmp_path):
+    """qijia is deprecated since biyi moved to API; partial/empty qijia is now OK."""
     p = _write(
         tmp_path / "config.yaml",
         """
@@ -69,8 +70,9 @@ slack:
   webhook: https://x
 """,
     )
-    with pytest.raises(RuntimeError, match="user"):
-        load_config(p)
+    cfg = load_config(p)
+    # Should load without raising. qijia fields can be empty.
+    assert cfg.qijia.user == ""
 
 
 def test_missing_slack_webhook_raises(tmp_path):

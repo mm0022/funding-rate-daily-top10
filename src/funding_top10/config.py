@@ -67,13 +67,20 @@ class ScoreConfig:
 
 
 @dataclass(frozen=True)
+class BiyiConfig:
+    base_url: str           # internal strategy API base URL
+    query: str              # free-form query string passed to /strategies/list
+
+
+@dataclass(frozen=True)
 class Config:
-    qijia: QijiaConfig
+    qijia: QijiaConfig                 # deprecated — biyi now comes from biyi_api
     slack: SlackConfig
     datahub: DataHubConfig
     score_weights: ScoreWeightsConfig  # deprecated
     filters: FiltersConfig
     score: ScoreConfig
+    biyi: BiyiConfig
     proxy: str  # full URL, e.g. "http://proxy.host:8080"; empty disables proxy
 
 
@@ -102,24 +109,21 @@ def load_config(path: Path | None = None) -> Config:
     score_raw = raw.get("score_weights") or {}
     filters_raw = raw.get("filters") or {}
     score_cfg_raw = raw.get("score") or {}
+    biyi_raw = raw.get("biyi") or {}
     proxy_raw = raw.get("proxy") or ""
 
-    missing_qijia = [k for k in _REQUIRED_QIJIA if not qijia_raw.get(k)]
-    if missing_qijia:
-        raise RuntimeError(
-            f"config.yaml: missing required qijia fields: {', '.join(missing_qijia)}"
-        )
-
+    # qijia is no longer required (biyi moved to API). Keep loading whatever
+    # fields are present so older config files don't break.
     if not slack_raw.get("webhook"):
         raise RuntimeError("config.yaml: missing required slack.webhook")
 
     return Config(
         qijia=QijiaConfig(
-            host=str(qijia_raw["host"]),
-            port=int(qijia_raw["port"]),
-            user=str(qijia_raw["user"]),
-            password=str(qijia_raw["password"]),
-            database=str(qijia_raw["database"]),
+            host=str(qijia_raw.get("host", "")),
+            port=int(qijia_raw.get("port", 0) or 0),
+            user=str(qijia_raw.get("user", "")),
+            password=str(qijia_raw.get("password", "")),
+            database=str(qijia_raw.get("database", "")),
         ),
         slack=SlackConfig(
             webhook=str(slack_raw["webhook"]),
@@ -143,6 +147,10 @@ def load_config(path: Path | None = None) -> Config:
         ),
         score=ScoreConfig(
             confidence_z=float(score_cfg_raw.get("confidence_z", 1.645)),
+        ),
+        biyi=BiyiConfig(
+            base_url=str(biyi_raw.get("base_url") or "https://biyi.tky.laozi.pro/biyi/api"),
+            query=str(biyi_raw.get("query") or ""),
         ),
         proxy=str(proxy_raw or ""),
     )

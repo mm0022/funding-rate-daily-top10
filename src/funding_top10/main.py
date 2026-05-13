@@ -16,12 +16,11 @@ import datetime  # noqa: E402
 import logging  # noqa: E402
 
 import pandas as pd  # noqa: E402
-from sqlalchemy import create_engine, text  # noqa: E402
 
 from funding_top10.binance_api import fetch_funding_dataframe  # noqa: E402
+from funding_top10.biyi_api import fetch_biyi_tickers as fetch_biyi_tickers_api  # noqa: E402
 from funding_top10.config import load_config  # noqa: E402
 from funding_top10.datahub import DataHub, load_binance_haircuts  # noqa: E402
-from funding_top10.queries import biyi_tickers_sql  # noqa: E402
 from funding_top10.scoring import ScoreWeights, select_rows_to_show  # noqa: E402
 from funding_top10.slack_message import build_message, post_to_slack  # noqa: E402
 
@@ -30,10 +29,6 @@ logger = logging.getLogger(__name__)
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 
 
-def fetch_biyi_tickers(engine, lookback_interval: str = "1 day") -> list[str]:
-    with engine.connect() as conn:
-        df = pd.read_sql_query(text(biyi_tickers_sql(lookback_interval)), conn)
-    return df["ticker"].dropna().tolist()
 
 
 def main() -> int:
@@ -45,11 +40,9 @@ def main() -> int:
     funding_df = fetch_funding_dataframe(proxy=cfg.proxy)
     logger.info("Got %d BINANCE-U USDT-perp rows from Binance API", len(funding_df))
 
-    # DB uses psycopg2 — it doesn't consult HTTP_PROXY env vars at all. We pass
-    # nothing here; the DSN drives the TCP connection directly.
-    engine = create_engine(cfg.qijia.to_dsn())
-    biyi = fetch_biyi_tickers(engine)
-    logger.info("Got %d biyi tickers from DB (last 24h)", len(biyi))
+    logger.info("Fetching biyi tickers from %s (query=%r)…", cfg.biyi.base_url, cfg.biyi.query)
+    biyi = fetch_biyi_tickers_api(base_url=cfg.biyi.base_url, query=cfg.biyi.query)
+    logger.info("Got %d biyi tickers from API", len(biyi))
 
     # Haircut: query DataHub for ALL Binance USDT-perp bases + biyi. The new
     # ranking by composite score needs every symbol's haircut (BTC/ETH have

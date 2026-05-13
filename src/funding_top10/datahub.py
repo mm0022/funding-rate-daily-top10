@@ -192,6 +192,8 @@ def load_binance_haircuts(datahub: DataHub, tokens: list[str]) -> dict[str, floa
     """
     haircuts: dict[str, float] = {}
     skipped_non_ascii = 0
+    queried = 0
+    not_found: list[str] = []
     diag_budget = 3
 
     for token in tokens:
@@ -221,19 +223,26 @@ def load_binance_haircuts(datahub: DataHub, tokens: list[str]) -> dict[str, floa
                 used_key = key
                 break
 
+        queried += 1
         if diag_budget > 0:
             logger.info("haircut diag — token=%s used_key=%s raw=%r", token, used_key, raw)
             diag_budget -= 1
 
         if raw is None:
+            not_found.append(token)
             continue
 
         parsed = extract_haircut_value(raw)
         if parsed is not None:
             haircuts[token] = parsed
+            logger.info("haircut found — token=%s key=%s value=%s", token, used_key, parsed)
         else:
             logger.warning("haircut for %s (key=%s) has unrecognised shape: %r", token, used_key, raw)
 
     if skipped_non_ascii:
         logger.info("Skipped %d non-ASCII token(s) (no DataHub haircut for those)", skipped_non_ascii)
+    logger.info(
+        "haircut summary: %d/%d queried tokens had data; not-found=%r",
+        len(haircuts), queried, not_found[:20],
+    )
     return haircuts

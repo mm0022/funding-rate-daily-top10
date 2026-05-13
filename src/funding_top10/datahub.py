@@ -18,9 +18,29 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Binance USDT-perp denomination prefixes: 1000, 10000, 100000, 1000000, ...
+# These are NOT part of the underlying token name (e.g. 1000FLOKI's haircut is
+# FLOKI's haircut). Single-zero / no-zero leading "1" tokens like 1INCH are
+# legitimate token names and must NOT be stripped.
+_DENOMINATION_PREFIX = re.compile(r"^10{3,}")
+
+
+def strip_denomination_prefix(base: str) -> str:
+    """Remove a Binance perp denomination prefix if present.
+
+    Examples:
+        BTC          → BTC
+        1000FLOKI    → FLOKI
+        10000PEPE    → PEPE
+        1000000MOG   → MOG
+        1INCH        → 1INCH   (only one "0" — not a denom prefix)
+    """
+    return _DENOMINATION_PREFIX.sub("", base)
 
 
 def normalize_key(key: str, prefix: str) -> str:
@@ -109,38 +129,39 @@ class DataHub:
 
 
 def load_binance_haircuts(datahub: DataHub, tokens: list[str]) -> dict[str, float]:
-    """Fetch BINANCE_MARGIN_<TOKEN>.HAIRCUT for each ASCII token in `tokens`.
+    """Fetch the haircut for each ASCII token in `tokens`.
+
+    Each token is the perp base symbol (e.g. '1000FLOKI'). We strip Binance's
+    denomination prefix (so '1000FLOKI' → 'FLOKI') before forming the DataHub
+    key. The returned dict keys are the ORIGINAL token names so the caller can
+    map directly from funding_df['base'].
 
     Tokens with non-ASCII characters (e.g. Chinese meme-coin names) are skipped
     silently — DataHub does not store haircuts for them and querying just
     pollutes the log.
 
-    Returns a {token: haircut_value} dict; tokens whose key is missing or whose
-    value can't be parsed are simply absent from the result (caller treats them
-    as NaN/unknown).
-
     For the first few tokens we log the raw DataHub return value at INFO level
-    so we can diagnose key-format / value-shape problems without sprinkling
-    print statements.
+    so we can diagnose key-format / value-shape problems.
     """
     haircuts: dict[str, float] = {}
     skipped_non_ascii = 0
-    diag_budget = 3  # how many raw samples to log at INFO
+    diag_budget = 3
 
     for token in tokens:
         if not token.isascii():
             skipped_non_ascii += 1
             continue
 
-        key = f"BINANCE_MARGIN_{token}.HAIRCUT"
+        underlying = strip_denomination_prefix(token)
+        key = f"BINANCE_MARGIN_{underlying}.HAIRCUT"
         try:
             raw = datahub.load_value(key)
         except Exception as e:  # noqa: BLE001
-            logger.warning("haircut fetch for %s failed: %s", token, e)
+            logger.warning("haircut fetch for %s (key=%s) failed: %s", token, key, e)
             continue
 
         if diag_budget > 0:
-            logger.info("haircut diag — key=%s raw=%r", key, raw)
+            logger.info("haircut diag — token=%s key=%s raw=%r", token, key, raw)
             diag_budget -= 1
 
         if raw is None:
@@ -150,7 +171,7 @@ def load_binance_haircuts(datahub: DataHub, tokens: list[str]) -> dict[str, floa
         if parsed is not None:
             haircuts[token] = parsed
         else:
-            logger.warning("haircut for %s has unrecognised shape: %r", token, raw)
+            logger.warning("haircut for %s (key=%s) has unrecognised shape: %r", token, key, raw)
 
     if skipped_non_ascii:
         logger.info("Skipped %d non-ASCII token(s) (no DataHub haircut for those)", skipped_non_ascii)

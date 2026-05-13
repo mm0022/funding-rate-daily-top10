@@ -5,7 +5,7 @@ here — the SDK isn't on pypi and isn't installed in the test environment.
 Integration testing happens on the Windows deployment box.
 """
 
-from funding_top10.datahub import extract_haircut_value, normalize_key
+from funding_top10.datahub import extract_haircut_value, normalize_key, strip_denomination_prefix
 
 
 # ---- normalize_key ----
@@ -58,3 +58,32 @@ def test_extract_returns_none_for_unknown_shape():
     assert extract_haircut_value(None) is None
     assert extract_haircut_value("not a number") is None
     assert extract_haircut_value([{"unknown": 1}]) is None
+
+
+# ---- strip_denomination_prefix ----
+
+
+def test_strip_denom_handles_plain_token():
+    assert strip_denomination_prefix("BTC") == "BTC"
+    assert strip_denomination_prefix("ETH") == "ETH"
+
+
+def test_strip_denom_handles_1000_prefix():
+    assert strip_denomination_prefix("1000FLOKI") == "FLOKI"
+    assert strip_denomination_prefix("1000PEPE") == "PEPE"
+
+
+def test_strip_denom_handles_larger_denom_prefixes():
+    assert strip_denomination_prefix("10000PEPE") == "PEPE"
+    assert strip_denomination_prefix("100000XYZ") == "XYZ"
+    assert strip_denomination_prefix("1000000MOG") == "MOG"
+
+
+def test_strip_denom_keeps_1inch_style():
+    # 1INCH is a real token name; the regex requires at least three trailing zeros
+    assert strip_denomination_prefix("1INCH") == "1INCH"
+
+
+def test_strip_denom_keeps_token_without_leading_digit():
+    assert strip_denomination_prefix("A") == "A"
+    assert strip_denomination_prefix("LINK") == "LINK"

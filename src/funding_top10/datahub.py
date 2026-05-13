@@ -225,12 +225,17 @@ class DataHub:
     def load_haircut_value(self, symbol: str,
                            *, lookback_days: int = DEFAULT_HAIRCUT_LOOKBACK_DAYS) -> float | None:
         """Fetch the latest haircut for a market-data symbol via the SDK's
-        ``Client.request``. Returns the latest sample's first-tier ``value``,
-        or ``None`` if no rows in the window.
+        ``Client.request``. Mirrors alpha's market_data_request(is_backfill=True):
+          1. request [now - lookback, now]
+          2. if empty, retry [now - lookback, MAX_TIMESTAMP]
+        Returns the latest sample's first-tier ``value``, or ``None``.
         """
-        end_ms = int(time.time() * 1000)
-        start_ms = end_ms - lookback_days * 24 * 3600 * 1000
-        hub_data = self._client.request(symbol, start_time=start_ms, end_time=_FAR_FUTURE_MS)
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - lookback_days * 24 * 3600 * 1000
+
+        hub_data = self._client.request(symbol, start_time=start_ms, end_time=now_ms)
+        if hub_data.data is None or hub_data.data.empty:
+            hub_data = self._client.request(symbol, start_time=start_ms, end_time=_FAR_FUTURE_MS)
         return parse_haircut_from_market_data_df(hub_data.data)
 
 

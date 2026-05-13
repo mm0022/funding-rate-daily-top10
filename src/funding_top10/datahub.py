@@ -204,6 +204,35 @@ class DataHub:
         )
 
 
+    def load_value(self, key: str) -> Any | None:
+        """Return the latest JSON-decoded value for `key`, or None if missing.
+
+        For sequenced JSON keys. Use ``load_haircut_value`` for haircut data
+        (which lives under the market-data namespace).
+        """
+        full_key = normalize_key(key, self.prefix)
+        hub_data = self._client.request_latest_sequenced_data(full_key)
+        if hub_data.data is None or hub_data.data.empty:
+            return None
+        item = hub_data.data.iloc[0]
+        content = item["content"]
+        content_type = item["content_type"]
+        if content_type == "JSON":
+            return json.loads(content)
+        return content
+
+    def load_haircut_value(self, symbol: str,
+                           *, lookback_days: int = DEFAULT_HAIRCUT_LOOKBACK_DAYS) -> float | None:
+        """Fetch the latest haircut for a market-data symbol via the SDK's
+        ``Client.request``. Returns the latest sample's first-tier ``value``,
+        or ``None`` if no rows in the window.
+        """
+        end_ms = int(time.time() * 1000)
+        start_ms = end_ms - lookback_days * 24 * 3600 * 1000
+        hub_data = self._client.request(symbol, start_time=start_ms, end_time=_FAR_FUTURE_MS)
+        return parse_haircut_from_market_data_df(hub_data.data)
+
+
 _sdk_move_file_patched = False
 
 
@@ -226,8 +255,6 @@ def _patch_sdk_move_file_for_windows_av() -> None:
     except ImportError:
         return  # SDK not installed; nothing to patch
 
-    original = _fh.FileHelper.move_file
-
     def _move_no_chmod(src_file_name: str, desc_file_name: str) -> None:
         if src_file_name and desc_file_name and os.path.exists(src_file_name):
             os.rename(src_file_name, desc_file_name)
@@ -235,44 +262,6 @@ def _patch_sdk_move_file_for_windows_av() -> None:
     _fh.FileHelper.move_file = staticmethod(_move_no_chmod)
     _sdk_move_file_patched = True
     logger.info("nexus_data_hub_sdk.FileHelper.move_file patched (no chmod) to dodge Windows AV")
-    del original  # unused; kept reference avoidance
-
-    def load_value(self, key: str) -> Any | None:
-        """Return the latest JSON-decoded value for `key`, or None if missing.
-
-        For sequenced JSON keys. Use ``load_haircut_value`` for haircut data
-        (which lives under the market-data namespace).
-        """
-        full_key = normalize_key(key, self.prefix)
-        hub_data = self._client.request_latest_sequenced_data(full_key)
-        if hub_data.data is None or hub_data.data.empty:
-            return None
-        item = hub_data.data.iloc[0]
-        content = item["content"]
-        content_type = item["content_type"]
-        if content_type == "JSON":
-            return json.loads(content)
-        return content
-
-    def load_haircut_value(self, symbol: str,
-                           *, lookback_days: int = DEFAULT_HAIRCUT_LOOKBACK_DAYS) -> float | None:
-        """Fetch the latest haircut for a market-data symbol.
-
-        One ``client.request`` call with a wide window:
-          - start_time = now - 90 days
-          - end_time   = FAR_FUTURE (~year 5138)
-
-        We always pull all rows in that window and return the latest one's
-        first-tier ``value``. Wide-by-default is safer than tight-then-retry
-        because a token whose haircut data feed paused weeks ago is invisible
-        to a narrow window, no matter how the retry is shaped.
-
-        Returns ``None`` only when truly no rows exist for that symbol.
-        """
-        end_ms = int(time.time() * 1000)
-        start_ms = end_ms - lookback_days * 24 * 3600 * 1000
-        hub_data = self._client.request(symbol, start_time=start_ms, end_time=_FAR_FUTURE_MS)
-        return parse_haircut_from_market_data_df(hub_data.data)
 
 
 def parse_haircut_from_market_data_df(df: Any) -> float | None:

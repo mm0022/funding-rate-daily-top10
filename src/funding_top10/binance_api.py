@@ -111,29 +111,42 @@ async def _fetch_all_async(proxy: str = "") -> pd.DataFrame:
         usdt_rows = [p for p in premium if _is_usdt_perp(str(p.get("symbol", "")))]
         symbols = [p["symbol"] for p in usdt_rows]
 
+        # Phase 1: per-symbol funding history.
         history_coros = [bounded(fetch_funding_history(client, s, days=7)) for s in symbols]
-        oi_coros = [bounded(fetch_open_interest(client, s)) for s in symbols]
+        history_results = await asyncio.gather(*history_coros, return_exceptions=True)
 
-        histories, ois = await asyncio.gather(
-            asyncio.gather(*history_coros, return_exceptions=True),
-            asyncio.gather(*oi_coros, return_exceptions=True),
-            return_exceptions=False,
-        )
+        history_by_symbol: dict[str, list[dict]] = {}
+        for sym, hist in zip(symbols, history_results):
+            if isinstance(hist, Exception):
+                logger.warning("funding history fetch for %s failed: %r", sym, hist)
+                continue
+            if not hist:
+                logger.info("funding history for %s returned empty list (likely recently-listed)", sym)
+                continue
+            history_by_symbol[sym] = hist
+
+        # Phase 2: OI only for symbols whose funding history was non-empty —
+        # symbols that returned empty history (recently-listed / delisted) tend
+        # to also 400 on /openInterest, so skipping them removes noise.
+        oi_symbols = list(history_by_symbol.keys())
+        oi_coros = [bounded(fetch_open_interest(client, s)) for s in oi_symbols]
+        oi_results = await asyncio.gather(*oi_coros, return_exceptions=True)
+
+        oi_by_symbol: dict[str, dict] = {}
+        for sym, oi in zip(oi_symbols, oi_results):
+            if isinstance(oi, Exception):
+                logger.warning("openInterest fetch for %s failed: %r", sym, oi)
+                continue
+            if isinstance(oi, dict):
+                oi_by_symbol[sym] = oi
 
     now_ms = int(time.time() * 1000)
     rows: list[dict] = []
-    for p, history, oi in zip(usdt_rows, histories, ois):
+    for p in usdt_rows:
         symbol = str(p["symbol"])
         base = _base_from_symbol(symbol)
-
-        if isinstance(history, Exception):
-            logger.warning("funding history fetch for %s failed: %r", symbol, history)
-            history = []
-        elif not history:
-            logger.info("funding history for %s returned empty list (likely recently-listed)", symbol)
-        if isinstance(oi, Exception):
-            logger.warning("openInterest fetch for %s failed: %r", symbol, oi)
-            oi = {}
+        history = history_by_symbol.get(symbol, [])
+        oi = oi_by_symbol.get(symbol, {})
 
         try:
             mark_price = float(p.get("markPrice"))

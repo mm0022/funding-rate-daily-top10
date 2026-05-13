@@ -67,6 +67,7 @@ def main() -> int:
         prefix=cfg.datahub.prefix,
         api_key=cfg.datahub.api_key,
         gateway_url=cfg.datahub.gateway_url,
+        cache_directory=cfg.datahub.cache_dir or None,
     )
     haircuts = load_binance_haircuts(datahub, tokens_to_fetch)
     logger.info("Got %d haircut values from DataHub", len(haircuts))

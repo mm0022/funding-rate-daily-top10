@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 import time
 from typing import Any
 
@@ -28,9 +27,10 @@ logger = logging.getLogger(__name__)
 
 
 # Local cache directory the nexus_data_hub_sdk uses to spool downloaded
-# market-data files. Defaults to "./.data" which on Windows often fails
-# with WinError 5 (access denied) — write to the system temp dir instead.
-DEFAULT_SDK_CACHE_DIR = os.path.join(tempfile.gettempdir(), "funding_top10_datahub")
+# market-data files. Defaults to ~/.datahub_cache — outside AppData/Temp,
+# which corporate AV products often quarantine .tmp writes from. Override
+# via DataHub(cache_directory=...) or the [datahub] cache_dir config field.
+DEFAULT_SDK_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".datahub_cache")
 
 
 # Default look-back for the haircut market-data query. We open the window

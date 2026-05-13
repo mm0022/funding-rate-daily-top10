@@ -43,6 +43,7 @@ class DataHubConfig:
     prefix: str          # e.g. "CYBERX_PROD"
     api_key: str
     gateway_url: str     # e.g. "https://nexus.tyo.cyberx.com/nexus-data-hub-gateway/"
+    cache_dir: str       # local cache path; "" → use DEFAULT_SDK_CACHE_DIR
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,7 @@ def load_config(path: Path | None = None) -> Config:
             prefix=str(datahub_raw.get("prefix") or ""),
             api_key=str(datahub_raw.get("api_key") or ""),
             gateway_url=str(datahub_raw.get("gateway_url") or ""),
+            cache_dir=str(datahub_raw.get("cache_dir") or ""),
         ),
         proxy=str(proxy_raw or ""),
     )

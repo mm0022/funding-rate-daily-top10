@@ -60,6 +60,7 @@ def main() -> int:
                 prefix=prefix,
                 api_key=cfg.datahub.api_key,
                 gateway_url=cfg.datahub.gateway_url,
+                cache_directory=cfg.datahub.cache_dir or None,
             )
         except Exception as e:  # noqa: BLE001
             print(f"  init failed: {e}")

@@ -20,6 +20,10 @@ datahub:
   prefix: "CYBERX_PROD"                                           # CYBERX_PROD / CYBERX_STAGING / CYBERX_OFFICE / CYBERX_DEV
   api_key: "a98d8d7c83584791b41603a4c4123b5c"                     # tyo prod key — replace for other locations
   gateway_url: "https://nexus.tyo.cyberx.com/nexus-data-hub-gateway/"  # tyo gateway
+  # Where the SDK spools downloaded .gz files. "" = ~/.datahub_cache.
+  # If corporate AV blocks writes to that path (WinError 5), point this to
+  # a folder you know is writable, e.g. "C:\\Users\\you\\Documents\\dhcache".
+  cache_dir: ""
 
 # HTTP/HTTPS proxy URL used for BOTH the Binance API calls and the Slack webhook
 # POST (any outbound HTTP). Internal DataHub gateway and DB do NOT go through

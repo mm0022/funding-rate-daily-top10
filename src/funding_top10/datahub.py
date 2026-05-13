@@ -25,12 +25,14 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# Default look-back when fetching the latest haircut as a market-data series.
-# The data updates roughly hourly, so 24 h is more than enough to see at
-# least one sample under normal conditions.
-DEFAULT_HAIRCUT_LOOKBACK_HOURS = 24
+# Default look-back for the haircut market-data query. We open the window
+# wide (90 days back, end pushed to far future) so even tokens whose haircut
+# data updates infrequently — or whose data feed stopped a while ago — still
+# return at least the most recent sample. The DataFrame we get back will be
+# sorted by sample_time and the latest row is used.
+DEFAULT_HAIRCUT_LOOKBACK_DAYS = 90
 
-# Sentinel for the backfill retry: mirrors alpha's Constants.MAX_TIMESTAMP.
+# Sentinel for the end_time: mirrors alpha's Constants.MAX_TIMESTAMP.
 # ~year 5138 — far beyond any real funding-rate event.
 _FAR_FUTURE_MS = 99_999_999_999_999
 
@@ -199,27 +201,23 @@ class DataHub:
         return content
 
     def load_haircut_value(self, symbol: str,
-                           *, lookback_hours: int = DEFAULT_HAIRCUT_LOOKBACK_HOURS) -> float | None:
+                           *, lookback_days: int = DEFAULT_HAIRCUT_LOOKBACK_DAYS) -> float | None:
         """Fetch the latest haircut for a market-data symbol.
 
-        Mirrors alpha's ``DataHubClient.market_data_request(..., is_backfill=True)``:
-          1. Request the [now - lookback, now] window.
-          2. If empty, retry with the same start_time but end_time pushed to
-             far future — this is what makes the SDK actually return the most
-             recent samples regardless of how stale they are.
-        Then take the latest row's first-tier ``value``.
+        One ``client.request`` call with a wide window:
+          - start_time = now - 90 days
+          - end_time   = FAR_FUTURE (~year 5138)
 
-        Returns ``None`` when both requests come back empty.
+        We always pull all rows in that window and return the latest one's
+        first-tier ``value``. Wide-by-default is safer than tight-then-retry
+        because a token whose haircut data feed paused weeks ago is invisible
+        to a narrow window, no matter how the retry is shaped.
+
+        Returns ``None`` only when truly no rows exist for that symbol.
         """
         end_ms = int(time.time() * 1000)
-        start_ms = end_ms - lookback_hours * 3600 * 1000
-
-        hub_data = self._client.request(symbol, start_time=start_ms, end_time=end_ms)
-        if hub_data.data is None or hub_data.data.empty:
-            hub_data = self._client.request(
-                symbol, start_time=start_ms, end_time=_FAR_FUTURE_MS,
-            )
-
+        start_ms = end_ms - lookback_days * 24 * 3600 * 1000
+        hub_data = self._client.request(symbol, start_time=start_ms, end_time=_FAR_FUTURE_MS)
         return parse_haircut_from_market_data_df(hub_data.data)
 
 

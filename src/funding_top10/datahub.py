@@ -296,13 +296,17 @@ def parse_haircut_from_market_data_df(df: Any) -> float | None:
     tiers = latest.get("haircut") if hasattr(latest, "get") else latest["haircut"]
     if isinstance(tiers, list) and tiers and isinstance(tiers[0], dict):
         v = tiers[0].get("value")
-        if isinstance(v, (int, float)) and not (isinstance(v, float) and v != v):
-            return float(v)
-        if isinstance(v, str):
-            try:
-                return float(v)
-            except ValueError:
-                return None
+        if v is None:
+            return None
+        # The SDK returns the value as decimal.Decimal — float() handles that as
+        # well as int / float / numeric-string.
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        if f != f:  # NaN
+            return None
+        return f
     return None
 
 

@@ -155,6 +155,21 @@ def test_strip_denom_keeps_token_without_leading_digit():
 # ---- parse_haircut_from_market_data_df (the new path used in production) ----
 
 
+def test_parse_market_data_handles_decimal_value():
+    """The SDK returns value as decimal.Decimal — must convert to float."""
+    from decimal import Decimal
+    df = pd.DataFrame(
+        [
+            {
+                "sample_time": 1776067200000,
+                "haircut": [{"left": 0, "right": 9999999999999, "value": Decimal("0.95")}],
+                "symbol": "BTC",
+            }
+        ]
+    )
+    assert parse_haircut_from_market_data_df(df) == 0.95
+
+
 def test_parse_market_data_picks_latest_sample():
     # Real shape from alpha: data_hub.market_data_request("BINANCE_MARGIN_BTC.HAIRCUT", ...)
     df = pd.DataFrame(

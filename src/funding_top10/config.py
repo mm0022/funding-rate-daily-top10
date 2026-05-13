@@ -45,10 +45,18 @@ class BinanceConfig:
 
 
 @dataclass(frozen=True)
+class DataHubConfig:
+    prefix: str          # e.g. "CYBERX_PROD"
+    api_key: str
+    gateway_url: str     # e.g. "https://nexus.tyo.cyberx.com/nexus-data-hub-gateway/"
+
+
+@dataclass(frozen=True)
 class Config:
     qijia: QijiaConfig
     slack: SlackConfig
     binance: BinanceConfig
+    datahub: DataHubConfig
     proxy: str  # full URL, e.g. "http://proxy.host:8080"; empty disables proxy
 
 
@@ -74,6 +82,7 @@ def load_config(path: Path | None = None) -> Config:
     qijia_raw = raw.get("qijia") or {}
     slack_raw = raw.get("slack") or {}
     binance_raw = raw.get("binance") or {}
+    datahub_raw = raw.get("datahub") or {}
     proxy_raw = raw.get("proxy") or ""
 
     missing_qijia = [k for k in _REQUIRED_QIJIA if not qijia_raw.get(k)]
@@ -100,6 +109,11 @@ def load_config(path: Path | None = None) -> Config:
         binance=BinanceConfig(
             api_key=str(binance_raw.get("api_key") or ""),
             api_secret=str(binance_raw.get("api_secret") or ""),
+        ),
+        datahub=DataHubConfig(
+            prefix=str(datahub_raw.get("prefix") or ""),
+            api_key=str(datahub_raw.get("api_key") or ""),
+            gateway_url=str(datahub_raw.get("gateway_url") or ""),
         ),
         proxy=str(proxy_raw or ""),
     )

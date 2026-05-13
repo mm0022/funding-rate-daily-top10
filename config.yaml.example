@@ -15,13 +15,20 @@ slack:
   channel: ""
 
 binance:
-  # Only required for the signed `/sapi/v1/portfolio/collateralRate` endpoint
-  # (haircut data). Public fapi endpoints (funding / OI) work without keys.
-  # Leave blank to skip haircut fetching — the haircut column will be NaN.
+  # Reserved for future signed Binance endpoints. The haircut column is now
+  # sourced from DataHub (below), so these are not currently used.
   api_key: ""
   api_secret: ""
 
+datahub:
+  # All three required for haircut lookups. The SDK is installed separately
+  # from the alpha repo's vendor dir (see deploy/README).
+  prefix: "CYBERX_PROD"                                           # CYBERX_PROD / CYBERX_STAGING / CYBERX_OFFICE / CYBERX_DEV
+  api_key: "a98d8d7c83584791b41603a4c4123b5c"                     # tyo prod key — replace for other locations
+  gateway_url: "https://nexus.tyo.cyberx.com/nexus-data-hub-gateway/"  # tyo gateway
+
 # HTTP/HTTPS proxy URL used for BOTH the Binance API calls and the Slack webhook
-# POST (any outbound HTTP). Internal DB (psycopg2) does not use this. Empty
-# string = no proxy. Example: "http://proxy.company.com:8080"
+# POST (any outbound HTTP). Internal DataHub gateway and DB do NOT go through
+# this (they're internal). Empty string = no proxy.
+# Example: "http://proxy.company.com:8080"
 proxy: ""

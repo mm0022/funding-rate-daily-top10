@@ -20,8 +20,9 @@ from sqlalchemy import create_engine, text  # noqa: E402
 
 from funding_top10.binance_api import fetch_funding_dataframe  # noqa: E402
 from funding_top10.config import load_config  # noqa: E402
+from funding_top10.datahub import DataHub, load_binance_haircuts  # noqa: E402
 from funding_top10.queries import biyi_tickers_sql  # noqa: E402
-from funding_top10.scoring import select_rows_to_show  # noqa: E402
+from funding_top10.scoring import TOP_X_BY_MEAN, select_rows_to_show  # noqa: E402
 from funding_top10.slack_message import build_message, post_to_slack  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ def main() -> int:
     cfg = load_config()
     proxy_repr = cfg.proxy or "(none)"
 
-    logger.info("Fetching funding/OI/haircut from Binance API (proxy=%s)…", proxy_repr)
+    logger.info("Fetching funding/OI from Binance API (proxy=%s)…", proxy_repr)
     funding_df = fetch_funding_dataframe(
         cfg.binance.api_key, cfg.binance.api_secret, proxy=cfg.proxy
     )
@@ -51,6 +52,27 @@ def main() -> int:
     engine = create_engine(cfg.qijia.to_dsn())
     biyi = fetch_biyi_tickers(engine)
     logger.info("Got %d biyi tickers from DB (last 24h)", len(biyi))
+
+    # Haircut: only fetch for the tokens we'll actually display — top-X by
+    # sum_7d (the haircut-filter input) plus biyi tokens. Avoids hammering
+    # DataHub with 300+ requests when ~50 are enough.
+    top_x_tokens = set(
+        funding_df.nlargest(TOP_X_BY_MEAN, "sum_7d_funding_rate")["base"].astype(str).tolist()
+    )
+    biyi_bases = {t.split("/")[0] for t in biyi if "/" in t}
+    tokens_to_fetch = sorted(top_x_tokens | biyi_bases)
+    logger.info(
+        "Fetching haircut for %d tokens from DataHub (top-%d ∪ biyi)…",
+        len(tokens_to_fetch), TOP_X_BY_MEAN,
+    )
+    datahub = DataHub(
+        prefix=cfg.datahub.prefix,
+        api_key=cfg.datahub.api_key,
+        gateway_url=cfg.datahub.gateway_url,
+    )
+    haircuts = load_binance_haircuts(datahub, tokens_to_fetch)
+    logger.info("Got %d haircut values from DataHub", len(haircuts))
+    funding_df["haircut"] = funding_df["base"].astype(str).map(haircuts)
 
     merged = select_rows_to_show(funding_df, biyi)
     logger.info("Merged display set: %d rows (top10 haircut>=0.5 ∪ biyi)", len(merged))

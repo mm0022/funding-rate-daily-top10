@@ -159,12 +159,17 @@ async def _fetch_all_async(api_key: str, api_secret: str, proxy: str = "") -> pd
         history_coros = [bounded(fetch_funding_history(client, s, days=7)) for s in symbols]
         oi_coros = [bounded(fetch_open_interest(client, s)) for s in symbols]
 
-        histories, ois, collat = await asyncio.gather(
+        # Note: haircut is sourced from DataHub now (see funding_top10/datahub.py),
+        # not from Binance's /sapi/v1/portfolio/collateralRate. api_key / api_secret
+        # are kept on the function signature for forward-compat but unused here.
+        del api_key, api_secret
+
+        histories, ois = await asyncio.gather(
             asyncio.gather(*history_coros, return_exceptions=True),
             asyncio.gather(*oi_coros, return_exceptions=True),
-            fetch_collateral_rates_safe(client, api_key, api_secret),
             return_exceptions=False,
         )
+        collat: list[dict] = []
 
     haircut_map: dict[str, float] = {}
     if isinstance(collat, list):

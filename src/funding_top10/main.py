@@ -92,8 +92,8 @@ def main() -> int:
         oi=cfg.score_weights.oi,
     )
     logger.info(
-        "Filters: min_haircut=%.2f min_oi_usd=%s; score = annualized_apr / annualized_std",
-        cfg.filters.min_haircut, f"{cfg.filters.min_oi_usd:,.0f}",
+        "Filters: min_haircut=%.2f min_oi_usd=%s; score = annualized_apr - %.3f * annualized_std",
+        cfg.filters.min_haircut, f"{cfg.filters.min_oi_usd:,.0f}", cfg.score.confidence_z,
     )
     merged = select_rows_to_show(
         funding_df,
@@ -101,8 +101,9 @@ def main() -> int:
         weights,
         min_haircut=cfg.filters.min_haircut,
         min_oi_usd=cfg.filters.min_oi_usd,
+        confidence_z=cfg.score.confidence_z,
     )
-    logger.info("Merged display set: %d rows (top by Sharpe ∪ biyi)", len(merged))
+    logger.info("Merged display set: %d rows (top by confidence-bound score ∪ biyi)", len(merged))
 
     today_beijing = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
     message = build_message(merged, biyi, report_date_str=today_beijing)

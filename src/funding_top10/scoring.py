@@ -5,8 +5,11 @@ Pipeline used by the daily report:
      std_annual = std_per_event * sqrt(N_events_per_year)
      N_events_per_year = (24 / interval_hours) * 365
   2. Hard filter: drop rows with haircut < MIN_HAIRCUT or OI < MIN_OI_USD.
-  3. Sharpe-like score = annualized_apr / annualized_std.
-     annualized_apr = sum_7d_funding_rate * 365 / 7
+  3. Score = one-sided confidence lower bound on annualized return:
+         score = annualized_apr - z * annualized_std
+     where annualized_apr = sum_7d_funding_rate * 365 / 7 and z is the
+     one-sided z-score (default 1.645 ⇔ 95% confidence). The score equals
+     "with z-confidence, real annualized return will be at least this much".
   4. Sort by score desc, take top N.
 
 `select_rows_to_show` then merges that top-N with the biyi-strategy tickers
@@ -26,6 +29,7 @@ import pandas as pd
 TOP_N_FINAL = 20
 MIN_HAIRCUT = 0.5
 MIN_OI_USD = 5_000_000  # $5M minimum open interest for a symbol to be a candidate
+DEFAULT_CONFIDENCE_Z = 1.645   # one-sided 95% confidence z-score
 
 
 @dataclass(frozen=True)
@@ -63,37 +67,46 @@ def add_annualized_std(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def compute_sharpe_score(df: pd.DataFrame) -> pd.Series:
-    """Sharpe-like score: annualized_apr / annualized_std.
+def compute_score(df: pd.DataFrame, *, z: float = DEFAULT_CONFIDENCE_Z) -> pd.Series:
+    """One-sided confidence-bound score: annualized_apr - z * annualized_std.
 
     annualized_apr = sum_7d_funding_rate * 365 / 7
     annualized_std comes from ``add_annualized_std`` (`std_7d_annualized`).
 
-    Higher score = better risk-adjusted funding return. Score can be negative
-    when funding direction is unfavourable. Rows with std=0 or NaN get NaN
-    score (sort_values will push them to the bottom by default).
+    Interpretation: with the chosen one-sided confidence (default 95%, z=1.645),
+    the real annualized funding return will be at least this much. Negative
+    score = "could lose money at that confidence".
+
+    z=1.0   ≈ 84% confidence, lighter std penalty (aggressive)
+    z=1.645 ≈ 95% confidence, default
+    z=2.0   ≈ 97.7% confidence, heavier penalty (conservative)
     """
     if df.empty:
         return pd.Series([], dtype=float, index=df.index)
     annualized_apr = df["sum_7d_funding_rate"] * 365.0 / 7.0
-    safe_std = df["std_7d_annualized"].replace(0, float("nan"))
-    return annualized_apr / safe_std
+    annualized_std = df["std_7d_annualized"]
+    return annualized_apr - z * annualized_std
 
 
-# Kept as an alias in case any external caller imports the old name.
+# Aliases kept for backwards compatibility with older imports / tests.
+def compute_sharpe_score(df: pd.DataFrame) -> pd.Series:
+    return compute_score(df)
+
+
 def compute_composite_score(df: pd.DataFrame, weights: ScoreWeights) -> pd.Series:  # noqa: ARG001
-    return compute_sharpe_score(df)
+    return compute_score(df)
 
 
 def select_top(
     df: pd.DataFrame,
-    weights: ScoreWeights,  # noqa: ARG001  (kept for signature compat; unused under Sharpe)
+    weights: ScoreWeights,  # noqa: ARG001  (kept for signature compat; unused)
     *,
     top_n_final: int = TOP_N_FINAL,
     min_haircut: float | None = MIN_HAIRCUT,
     min_oi_usd: float | None = MIN_OI_USD,
+    confidence_z: float = DEFAULT_CONFIDENCE_Z,
 ) -> pd.DataFrame:
-    """Hard-filter + Sharpe-score + sort + top N.
+    """Hard-filter + confidence-bound score + sort + top N.
 
     The input ``df`` is expected to already contain ``std_7d_annualized``
     (call :func:`add_annualized_std` first).
@@ -128,7 +141,7 @@ def select_top(
         return out
 
     scored = filtered.copy()
-    scored["score"] = compute_sharpe_score(scored)
+    scored["score"] = compute_score(scored, z=confidence_z)
     return (
         scored.sort_values("score", ascending=False, na_position="last")
         .head(top_n_final)
@@ -148,8 +161,9 @@ def select_rows_to_show(
     top_n_final: int = TOP_N_FINAL,
     min_haircut: float | None = MIN_HAIRCUT,
     min_oi_usd: float | None = MIN_OI_USD,
+    confidence_z: float = DEFAULT_CONFIDENCE_Z,
 ) -> pd.DataFrame:
-    """Pipeline entry: annualize std, hard-filter + Sharpe top-N, merge biyi rows."""
+    """Pipeline entry: annualize std, hard-filter + score top-N, merge biyi rows."""
     df = add_annualized_std(funding_df)
 
     top = select_top(
@@ -158,6 +172,7 @@ def select_rows_to_show(
         top_n_final=top_n_final,
         min_haircut=min_haircut,
         min_oi_usd=min_oi_usd,
+        confidence_z=confidence_z,
     )
 
     biyi_set = set(biyi_tickers)
@@ -168,7 +183,7 @@ def select_rows_to_show(
         biyi_rows = df.iloc[0:0].copy()
 
     if not biyi_rows.empty:
-        biyi_rows["score"] = compute_sharpe_score(biyi_rows)
+        biyi_rows["score"] = compute_score(biyi_rows, z=confidence_z)
 
     if len(top):
         top_keys = set(_ticker_series(top).tolist())

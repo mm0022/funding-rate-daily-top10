@@ -155,6 +155,7 @@ def _fmt_pct_value(x, digits: int = 1) -> str:
 
 
 def _fmt_score(x) -> str:
+    """Score is the annualized confidence-bound (a decimal rate). Display as %."""
     if x is None:
         return "n/a"
     try:
@@ -163,7 +164,7 @@ def _fmt_score(x) -> str:
         return "n/a"
     if math.isnan(xf):
         return "n/a"
-    return f"{xf:.3f}"
+    return f"{xf * 100:.1f}%"
 
 
 def _fmt_interval(h) -> str:

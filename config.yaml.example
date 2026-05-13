@@ -25,15 +25,20 @@ datahub:
   # a folder you know is writable, e.g. "C:\\Users\\you\\Documents\\dhcache".
   cache_dir: ""
 
-# Selection rules. Score = annualized_apr / annualized_std (Sharpe-like).
-# Haircut and OI act as hard filters — they don't enter the score itself.
-# score_weights below is deprecated (left in case older configs still have it).
+# Selection rules. Score = annualized_apr - z * annualized_std
+# (one-sided confidence lower bound on annualised funding return). Haircut
+# and OI act as hard filters — they don't enter the score itself.
 filters:
   min_haircut: 0.5         # drop tokens with haircut < this (NaN dropped too)
   min_oi_usd: 5000000      # drop tokens with OI < this (USD)
 
-# Deprecated: composite-rank weights. No longer used now that score is Sharpe.
-# Kept so older configs load without error; safe to delete.
+score:
+  # One-sided z-score for the confidence bound. Larger z = heavier std
+  # penalty = more conservative. 1.0 ≈ 84%, 1.645 ≈ 95%, 2.0 ≈ 97.7%.
+  confidence_z: 1.645
+
+# Deprecated: composite-rank weights. No longer used. Kept so older configs
+# load without error; safe to delete.
 score_weights:
   apr7: 0.40
   std: 0.20

@@ -62,12 +62,18 @@ class FiltersConfig:
 
 
 @dataclass(frozen=True)
+class ScoreConfig:
+    confidence_z: float     # one-sided z-score. 1.0=84% / 1.645=95% / 2.0=97.7%
+
+
+@dataclass(frozen=True)
 class Config:
     qijia: QijiaConfig
     slack: SlackConfig
     datahub: DataHubConfig
     score_weights: ScoreWeightsConfig  # deprecated
     filters: FiltersConfig
+    score: ScoreConfig
     proxy: str  # full URL, e.g. "http://proxy.host:8080"; empty disables proxy
 
 
@@ -95,6 +101,7 @@ def load_config(path: Path | None = None) -> Config:
     datahub_raw = raw.get("datahub") or {}
     score_raw = raw.get("score_weights") or {}
     filters_raw = raw.get("filters") or {}
+    score_cfg_raw = raw.get("score") or {}
     proxy_raw = raw.get("proxy") or ""
 
     missing_qijia = [k for k in _REQUIRED_QIJIA if not qijia_raw.get(k)]
@@ -133,6 +140,9 @@ def load_config(path: Path | None = None) -> Config:
         filters=FiltersConfig(
             min_haircut=float(filters_raw.get("min_haircut", 0.5)),
             min_oi_usd=float(filters_raw.get("min_oi_usd", 5_000_000)),
+        ),
+        score=ScoreConfig(
+            confidence_z=float(score_cfg_raw.get("confidence_z", 1.645)),
         ),
         proxy=str(proxy_raw or ""),
     )

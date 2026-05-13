@@ -77,10 +77,10 @@ def test_composite_score_lower_std_higher_score():
     assert scores.iloc[0] > scores.iloc[1] > scores.iloc[2]
 
 
-def test_composite_score_is_sharpe_apr_over_std():
-    # apr=0.014 over 7d => annualized = 0.014 * 365/7 = 0.73
+def test_composite_score_is_confidence_lower_bound():
+    # apr_annual = 0.014 * 365/7 = 0.73
     # std_annual = 0.10
-    # Sharpe = 7.3
+    # z=1.645 default → score = 0.73 - 1.645 * 0.10 = 0.5655
     df = pd.DataFrame(
         [
             {"base": "A", "quote": "USDT",
@@ -90,7 +90,7 @@ def test_composite_score_is_sharpe_apr_over_std():
         ]
     )
     scores = compute_composite_score(df, ScoreWeights())
-    assert scores.iloc[0] == pytest.approx(0.014 * 365 / 7 / 0.10)
+    assert scores.iloc[0] == pytest.approx(0.014 * 365 / 7 - 1.645 * 0.10)
 
 
 def test_composite_score_empty_df():

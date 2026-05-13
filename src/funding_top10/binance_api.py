@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 FAPI_BASE = "https://fapi.binance.com"
 SAPI_BASE = "https://api.binance.com"
 
-MAX_CONCURRENCY = 30
+MAX_CONCURRENCY = 5  # was 30; lowered after Binance returned 403s for rate violation
 HTTP_TIMEOUT = 30.0
 
 

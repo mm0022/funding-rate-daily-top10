@@ -256,8 +256,11 @@ def _patch_sdk_move_file_for_windows_av() -> None:
         return  # SDK not installed; nothing to patch
 
     def _move_no_chmod(src_file_name: str, desc_file_name: str) -> None:
+        # os.replace overwrites the destination on Windows, unlike os.rename
+        # which raises WinError 183 if dst exists. Replicates the upstream
+        # behaviour on POSIX too.
         if src_file_name and desc_file_name and os.path.exists(src_file_name):
-            os.rename(src_file_name, desc_file_name)
+            os.replace(src_file_name, desc_file_name)
 
     _fh.FileHelper.move_file = staticmethod(_move_no_chmod)
     _sdk_move_file_patched = True

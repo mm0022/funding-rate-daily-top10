@@ -25,15 +25,20 @@ datahub:
   # a folder you know is writable, e.g. "C:\\Users\\you\\Documents\\dhcache".
   cache_dir: ""
 
-# Composite score weights. Each metric is converted to a 0..1 percentile rank
-# (std is inverted — lower std = higher contribution). Final score = weighted
-# sum. Weights don't have to sum to 1 — they're relative. Rows are sorted by
-# score descending and the top N is taken.
+# Selection rules. Score = annualized_apr / annualized_std (Sharpe-like).
+# Haircut and OI act as hard filters — they don't enter the score itself.
+# score_weights below is deprecated (left in case older configs still have it).
+filters:
+  min_haircut: 0.5         # drop tokens with haircut < this (NaN dropped too)
+  min_oi_usd: 5000000      # drop tokens with OI < this (USD)
+
+# Deprecated: composite-rank weights. No longer used now that score is Sharpe.
+# Kept so older configs load without error; safe to delete.
 score_weights:
-  apr7: 0.40        # 7d_apr% (higher = more funding income)
-  std: 0.20         # std_7d annualized (lower = more stable)
-  haircut: 0.20     # haircut (higher = more capital-efficient)
-  oi: 0.20          # open interest USD (higher = more liquid)
+  apr7: 0.40
+  std: 0.20
+  haircut: 0.20
+  oi: 0.20
 
 # HTTP/HTTPS proxy URL used for BOTH the Binance API calls and the Slack webhook
 # POST (any outbound HTTP). Internal DataHub gateway and DB do NOT go through

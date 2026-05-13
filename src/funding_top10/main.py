@@ -92,11 +92,17 @@ def main() -> int:
         oi=cfg.score_weights.oi,
     )
     logger.info(
-        "Composite score weights: apr7=%.2f std=%.2f haircut=%.2f oi=%.2f",
-        weights.apr7, weights.std, weights.haircut, weights.oi,
+        "Filters: min_haircut=%.2f min_oi_usd=%s; score = annualized_apr / annualized_std",
+        cfg.filters.min_haircut, f"{cfg.filters.min_oi_usd:,.0f}",
     )
-    merged = select_rows_to_show(funding_df, biyi, weights)
-    logger.info("Merged display set: %d rows (top by score ∪ biyi)", len(merged))
+    merged = select_rows_to_show(
+        funding_df,
+        biyi,
+        weights,
+        min_haircut=cfg.filters.min_haircut,
+        min_oi_usd=cfg.filters.min_oi_usd,
+    )
+    logger.info("Merged display set: %d rows (top by Sharpe ∪ biyi)", len(merged))
 
     today_beijing = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
     message = build_message(merged, biyi, report_date_str=today_beijing)

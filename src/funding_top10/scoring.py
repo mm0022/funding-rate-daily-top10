@@ -4,10 +4,9 @@ Pipeline used by the daily report:
   1. Annualize std_7d_funding_rate using each symbol's funding_interval_hours.
      std_annual = std_per_event * sqrt(N_events_per_year)
      N_events_per_year = (24 / interval_hours) * 365
-  2. Drop rows whose haircut is null / < MIN_HAIRCUT.
-  3. Compute a composite 0..1 score = sum(weight_i * percentile_rank_i) over
-     four metrics (7d_apr, std, haircut, OI). std uses an inverted rank
-     because lower std is better.
+  2. Hard filter: drop rows with haircut < MIN_HAIRCUT or OI < MIN_OI_USD.
+  3. Sharpe-like score = annualized_apr / annualized_std.
+     annualized_apr = sum_7d_funding_rate * 365 / 7
   4. Sort by score desc, take top N.
 
 `select_rows_to_show` then merges that top-N with the biyi-strategy tickers
@@ -26,10 +25,13 @@ import pandas as pd
 
 TOP_N_FINAL = 20
 MIN_HAIRCUT = 0.5
+MIN_OI_USD = 5_000_000  # $5M minimum open interest for a symbol to be a candidate
 
 
 @dataclass(frozen=True)
 class ScoreWeights:
+    """Deprecated: composite-rank weights are no longer used; score is now
+    Sharpe-like (apr / std). Kept so older config.yaml doesn't break loading."""
     apr7: float = 0.4
     std: float = 0.2
     haircut: float = 0.2
@@ -61,44 +63,44 @@ def add_annualized_std(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def compute_composite_score(df: pd.DataFrame, weights: ScoreWeights) -> pd.Series:
-    """Rank-based composite score, returned as a Series aligned with df.index.
+def compute_sharpe_score(df: pd.DataFrame) -> pd.Series:
+    """Sharpe-like score: annualized_apr / annualized_std.
 
-    Each metric is converted to a percentile rank in [0, 1] (pct=True). std's
-    rank is inverted so that smaller-std rows contribute MORE to the score.
-    The output is the weighted sum (NOT normalised — caller treats it as a
-    relative score, sort-key only).
+    annualized_apr = sum_7d_funding_rate * 365 / 7
+    annualized_std comes from ``add_annualized_std`` (`std_7d_annualized`).
+
+    Higher score = better risk-adjusted funding return. Score can be negative
+    when funding direction is unfavourable. Rows with std=0 or NaN get NaN
+    score (sort_values will push them to the bottom by default).
     """
     if df.empty:
         return pd.Series([], dtype=float, index=df.index)
+    annualized_apr = df["sum_7d_funding_rate"] * 365.0 / 7.0
+    safe_std = df["std_7d_annualized"].replace(0, float("nan"))
+    return annualized_apr / safe_std
 
-    apr_rank = df["sum_7d_funding_rate"].rank(pct=True, na_option="bottom")
-    std_rank = df["std_7d_annualized"].rank(pct=True, na_option="top")
-    hc_rank = df["haircut"].rank(pct=True, na_option="bottom")
-    oi_rank = df["open_interest_value"].rank(pct=True, na_option="bottom")
 
-    # std: lower is better → invert rank
-    std_inv_rank = 1.0 - std_rank
-
-    return (
-        weights.apr7 * apr_rank
-        + weights.std * std_inv_rank
-        + weights.haircut * hc_rank
-        + weights.oi * oi_rank
-    )
+# Kept as an alias in case any external caller imports the old name.
+def compute_composite_score(df: pd.DataFrame, weights: ScoreWeights) -> pd.Series:  # noqa: ARG001
+    return compute_sharpe_score(df)
 
 
 def select_top(
     df: pd.DataFrame,
-    weights: ScoreWeights,
+    weights: ScoreWeights,  # noqa: ARG001  (kept for signature compat; unused under Sharpe)
     *,
     top_n_final: int = TOP_N_FINAL,
     min_haircut: float | None = MIN_HAIRCUT,
+    min_oi_usd: float | None = MIN_OI_USD,
 ) -> pd.DataFrame:
-    """Filter haircut + score + sort + top N.
+    """Hard-filter + Sharpe-score + sort + top N.
 
     The input ``df`` is expected to already contain ``std_7d_annualized``
     (call :func:`add_annualized_std` first).
+
+    Hard filters (any None to skip):
+      - haircut >= min_haircut (NaN/"None" string rows dropped)
+      - open_interest_value >= min_oi_usd  (NaN rows dropped)
     """
     required = {
         "sum_7d_funding_rate",
@@ -112,10 +114,13 @@ def select_top(
 
     filtered = df
     if min_haircut is not None and "haircut" in df.columns:
-        # Drop string "None" and rows with haircut < min_haircut (NaN dropped too)
         filtered = filtered[filtered["haircut"].astype(str) != "None"]
         haircut_numeric = pd.to_numeric(filtered["haircut"], errors="coerce")
         filtered = filtered[haircut_numeric >= min_haircut]
+
+    if min_oi_usd is not None and "open_interest_value" in df.columns:
+        oi_numeric = pd.to_numeric(filtered["open_interest_value"], errors="coerce")
+        filtered = filtered[oi_numeric >= min_oi_usd]
 
     if filtered.empty:
         out = filtered.copy()
@@ -123,9 +128,9 @@ def select_top(
         return out
 
     scored = filtered.copy()
-    scored["score"] = compute_composite_score(scored, weights)
+    scored["score"] = compute_sharpe_score(scored)
     return (
-        scored.sort_values("score", ascending=False)
+        scored.sort_values("score", ascending=False, na_position="last")
         .head(top_n_final)
         .reset_index(drop=True)
     )
@@ -142,14 +147,9 @@ def select_rows_to_show(
     *,
     top_n_final: int = TOP_N_FINAL,
     min_haircut: float | None = MIN_HAIRCUT,
+    min_oi_usd: float | None = MIN_OI_USD,
 ) -> pd.DataFrame:
-    """Pipeline entry point: annualize std, score top N, merge biyi rows.
-
-    The merged result is sorted by composite ``score`` descending. Biyi rows
-    that didn't make top-N appear at the bottom with their own score, so the
-    operator can still see them. Biyi rows that ARE in top-N keep their score
-    spot.
-    """
+    """Pipeline entry: annualize std, hard-filter + Sharpe top-N, merge biyi rows."""
     df = add_annualized_std(funding_df)
 
     top = select_top(
@@ -157,6 +157,7 @@ def select_rows_to_show(
         weights,
         top_n_final=top_n_final,
         min_haircut=min_haircut,
+        min_oi_usd=min_oi_usd,
     )
 
     biyi_set = set(biyi_tickers)
@@ -166,9 +167,8 @@ def select_rows_to_show(
     else:
         biyi_rows = df.iloc[0:0].copy()
 
-    # Score biyi rows too so the score column is populated
     if not biyi_rows.empty:
-        biyi_rows["score"] = compute_composite_score(biyi_rows, weights)
+        biyi_rows["score"] = compute_sharpe_score(biyi_rows)
 
     if len(top):
         top_keys = set(_ticker_series(top).tolist())
@@ -183,5 +183,7 @@ def select_rows_to_show(
 
     merged = pd.concat([top, biyi_extra], ignore_index=True)
     if len(merged):
-        merged = merged.sort_values("score", ascending=False).reset_index(drop=True)
+        merged = merged.sort_values(
+            "score", ascending=False, na_position="last"
+        ).reset_index(drop=True)
     return merged

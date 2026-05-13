@@ -77,12 +77,20 @@ def test_composite_score_lower_std_higher_score():
     assert scores.iloc[0] > scores.iloc[1] > scores.iloc[2]
 
 
-def test_composite_score_higher_haircut_higher_score():
-    df = _base_df()
-    w = ScoreWeights(apr7=0.0, std=0.0, haircut=1.0, oi=0.0)
-    scores = compute_composite_score(df, w)
-    # A has highest haircut
-    assert scores.iloc[0] > scores.iloc[2] > scores.iloc[1]
+def test_composite_score_is_sharpe_apr_over_std():
+    # apr=0.014 over 7d => annualized = 0.014 * 365/7 = 0.73
+    # std_annual = 0.10
+    # Sharpe = 7.3
+    df = pd.DataFrame(
+        [
+            {"base": "A", "quote": "USDT",
+             "sum_7d_funding_rate": 0.014,
+             "std_7d_annualized": 0.10,
+             "haircut": 0.8, "open_interest_value": 1e9},
+        ]
+    )
+    scores = compute_composite_score(df, ScoreWeights())
+    assert scores.iloc[0] == pytest.approx(0.014 * 365 / 7 / 0.10)
 
 
 def test_composite_score_empty_df():
@@ -104,11 +112,23 @@ def test_select_top_filters_haircut_and_sorts_by_score():
             {"base": "MID", "quote": "USDT", "sum_7d_funding_rate": 0.01, "std_7d_annualized": 0.20, "haircut": 0.7, "open_interest_value": 1e8},
         ]
     )
-    out = select_top(df, ScoreWeights(), top_n_final=10, min_haircut=0.5)
+    out = select_top(df, ScoreWeights(), top_n_final=10, min_haircut=0.5, min_oi_usd=0)
     assert "BAD_HAIRCUT" not in out["base"].values
     # GOOD and MID survive; score column populated
     assert "score" in out.columns
     assert len(out) == 2
+
+
+def test_select_top_filters_low_oi():
+    df = pd.DataFrame(
+        [
+            {"base": "BIG", "quote": "USDT", "sum_7d_funding_rate": 0.02, "std_7d_annualized": 0.10, "haircut": 0.8, "open_interest_value": 1e9},
+            {"base": "SMALL_OI", "quote": "USDT", "sum_7d_funding_rate": 0.03, "std_7d_annualized": 0.05, "haircut": 0.8, "open_interest_value": 1e6},
+        ]
+    )
+    out = select_top(df, ScoreWeights(), top_n_final=10, min_haircut=0.5, min_oi_usd=5_000_000)
+    assert "SMALL_OI" not in out["base"].values
+    assert "BIG" in out["base"].values
 
 
 def test_select_top_caps_to_top_n():

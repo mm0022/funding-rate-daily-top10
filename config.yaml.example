@@ -13,3 +13,10 @@ slack:
   webhook: ""
   # Slack channel id (e.g. C05XXXXXXXX). Optional — unused by webhook posts.
   channel: ""
+
+binance:
+  # Only required for the signed `/sapi/v1/portfolio/collateralRate` endpoint
+  # (haircut data). Public fapi endpoints (funding / OI) work without keys.
+  # Leave blank to skip haircut fetching — the haircut column will be NaN.
+  api_key: ""
+  api_secret: ""

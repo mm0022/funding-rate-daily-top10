@@ -39,9 +39,16 @@ class SlackConfig:
 
 
 @dataclass(frozen=True)
+class BinanceConfig:
+    api_key: str
+    api_secret: str
+
+
+@dataclass(frozen=True)
 class Config:
     qijia: QijiaConfig
     slack: SlackConfig
+    binance: BinanceConfig
 
 
 _REQUIRED_QIJIA = ("host", "port", "user", "password", "database")
@@ -65,6 +72,7 @@ def load_config(path: Path | None = None) -> Config:
 
     qijia_raw = raw.get("qijia") or {}
     slack_raw = raw.get("slack") or {}
+    binance_raw = raw.get("binance") or {}
 
     missing_qijia = [k for k in _REQUIRED_QIJIA if not qijia_raw.get(k)]
     if missing_qijia:
@@ -86,5 +94,9 @@ def load_config(path: Path | None = None) -> Config:
         slack=SlackConfig(
             webhook=str(slack_raw["webhook"]),
             channel=str(slack_raw.get("channel") or ""),
+        ),
+        binance=BinanceConfig(
+            api_key=str(binance_raw.get("api_key") or ""),
+            api_secret=str(binance_raw.get("api_secret") or ""),
         ),
     )

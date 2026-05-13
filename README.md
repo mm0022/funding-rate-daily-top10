@@ -4,11 +4,16 @@ Daily Slack report: top 10 BINANCE-U funding-rate symbols (high mean, low std ov
 
 ## What it does
 
-1. Query `funding_rate_data_original` + `open_interest_data_original` + `risk_manager_sys_param` (BINANCE-U only) to get per-symbol latest funding rate, 7-day mean/std, open interest, and MMR haircut.
-2. Rank: top 50 by `mean_7d_funding_rate` desc → top 10 of those by `std_7d_funding_rate` asc.
-3. Query `biyi_strategy_data_his` for distinct tickers with strategy `LONGSHORT_BINANCE*` and `max_position_in_usd > 1000` in the last 24h.
-4. Build a Slack message: Top 10 table + biyi ticker list. Top-10 rows whose `base/quote` ticker is in the biyi list are prefixed with 🟨.
-5. POST to a Slack incoming webhook.
+1. Fetch from Binance public/signed APIs (USDT-quoted BINANCE-U perps only):
+   - latest funding rate + mark price (`/fapi/v1/premiumIndex`)
+   - past 7 days of funding events per symbol (`/fapi/v1/fundingRate`)
+   - current open interest per symbol (`/fapi/v1/openInterest`)
+   - per-asset collateral rate / "haircut" (`/sapi/v1/portfolio/collateralRate`, **signed**)
+2. Compute per-symbol `sum_3d_funding_rate`, `sum_7d_funding_rate`, `std_7d_funding_rate` from history; convert OI to USD via mark price.
+3. Rank: top 50 by `sum_7d_funding_rate` desc → top 10 of those by `std_7d_funding_rate` asc (haircut must be >= 0.5).
+4. Query `biyi_strategy_data_his` (qijia DB) for distinct tickers with strategy `LONGSHORT_BINANCE*` and `max_position_in_usd > 1000` in the last 24h.
+5. Build a Slack message: merged Top 10 ∪ biyi rows, sorted by `sum_7d_funding_rate` desc. Biyi rows are prefixed with 🔴.
+6. POST to a Slack incoming webhook.
 
 Designed to run daily at 08:00 Beijing time on a Windows machine via Task Scheduler — see `deploy/README.md`.
 
@@ -17,12 +22,13 @@ Designed to run daily at 08:00 Beijing time on a Windows machine via Task Schedu
 ```
 funding-rate-daily-top10/
 ├── src/funding_top10/
-│   ├── config.py          config.yaml loader (qijia DB fields + slack)
-│   ├── queries.py         the two SQLs
-│   ├── scoring.py         top50-by-mean → top10-by-std
+│   ├── config.py          config.yaml loader (qijia DB + slack + binance keys)
+│   ├── binance_api.py     async client for fapi/sapi (funding/OI/haircut)
+│   ├── queries.py         the biyi SQL (only DB query left)
+│   ├── scoring.py         top50-by-sum-7d → top10-by-std-7d
 │   ├── slack_message.py   build + post the message
-│   └── main.py            entry point: fetch → rank → post
-├── tests/                 unit tests (config + scoring + slack_message)
+│   └── main.py            entry point: fetch (API + DB) → rank → post
+├── tests/                 unit tests
 ├── deploy/                Windows Task Scheduler bat + README
 ├── requirements.txt
 ├── pyproject.toml
@@ -57,7 +63,7 @@ Everything lives in `config.yaml` (git-ignored — use `config.yaml.example` as 
 
 ```yaml
 qijia:
-  host: ""           # required
+  host: ""           # required (only used for the biyi tickers query)
   port: 5432         # required
   user: ""           # required
   password: ""       # required — URL-encoded automatically when building the DSN
@@ -66,6 +72,11 @@ qijia:
 slack:
   webhook: ""        # required — Slack incoming webhook URL
   channel: ""        # optional — only needed if you later switch to files.upload
+
+binance:
+  api_key: ""        # optional — only needed for the signed /sapi/v1/portfolio/collateralRate
+  api_secret: ""     # endpoint that supplies the "haircut" column. Without keys,
+                     # haircut will be NaN; everything else still works.
 ```
 
 The qijia DSN is constructed at runtime as `postgresql+psycopg2://USER:PASSWORD@HOST:PORT/DATABASE`. User and password are URL-encoded so special characters (`@`, `/`, `#`, etc.) are safe.

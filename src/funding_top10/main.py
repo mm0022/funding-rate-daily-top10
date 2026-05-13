@@ -20,8 +20,9 @@ from contextlib import contextmanager  # noqa: E402
 import pandas as pd  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
 
+from funding_top10.binance_api import fetch_funding_dataframe  # noqa: E402
 from funding_top10.config import load_config  # noqa: E402
-from funding_top10.queries import FUNDING_STATS_SQL, biyi_tickers_sql  # noqa: E402
+from funding_top10.queries import biyi_tickers_sql  # noqa: E402
 from funding_top10.scoring import select_rows_to_show  # noqa: E402
 from funding_top10.slack_message import build_message, post_to_slack  # noqa: E402
 
@@ -49,14 +50,6 @@ def proxy_off():
                 os.environ[k] = v
 
 
-def fetch_funding_stats(engine) -> pd.DataFrame:
-    with engine.connect() as conn:
-        df = pd.read_sql_query(text(FUNDING_STATS_SQL), conn)
-    # Defensive: drop any duplicate columns (e.g. if a future SQL change brings
-    # back the historical duplicate sum_7d_funding_rate column).
-    return df.loc[:, ~df.columns.duplicated()]
-
-
 def fetch_biyi_tickers(engine, lookback_interval: str = "1 day") -> list[str]:
     with engine.connect() as conn:
         df = pd.read_sql_query(text(biyi_tickers_sql(lookback_interval)), conn)
@@ -67,18 +60,17 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config()
 
+    logger.info("Fetching funding/OI/haircut from Binance API…")
+    funding_df = fetch_funding_dataframe(cfg.binance.api_key, cfg.binance.api_secret)
+    logger.info("Got %d BINANCE-U USDT-perp rows from Binance API", len(funding_df))
+
     with proxy_off():
         engine = create_engine(cfg.qijia.to_dsn())
-
-        logger.info("Fetching funding_stats (BINANCE-U) [proxy off]…")
-        funding_df = fetch_funding_stats(engine)
-        logger.info("Got %d funding_stats rows", len(funding_df))
-
         biyi = fetch_biyi_tickers(engine)
-        logger.info("Got %d biyi tickers (last 24h)", len(biyi))
+        logger.info("Got %d biyi tickers from DB (last 24h)", len(biyi))
 
     merged = select_rows_to_show(funding_df, biyi)
-    logger.info("Merged display set: %d rows (top10 haircut<=0.5 ∪ biyi)", len(merged))
+    logger.info("Merged display set: %d rows (top10 haircut>=0.5 ∪ biyi)", len(merged))
 
     today_beijing = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
     message = build_message(merged, biyi, report_date_str=today_beijing)

@@ -29,7 +29,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from funding_top10.config import load_config  # noqa: E402
-from funding_top10.datahub import DataHub, extract_haircut_value  # noqa: E402
+from funding_top10.datahub import DataHub  # noqa: E402
 
 
 DEFAULT_TOKENS = ["ETHFI", "ENA", "PENDLE", "XAUT", "BTC", "FLOKI"]
@@ -68,21 +68,17 @@ def main() -> int:
 
         any_hit = False
         for token in tokens:
-            key = f"BINANCE_MARGIN_{token}.HAIRCUT"
+            symbol = f"BINANCE_MARGIN_{token}.HAIRCUT"
             try:
-                raw = dh.load_value(key)
+                value = dh.load_haircut_value(symbol)
             except Exception as e:  # noqa: BLE001
                 print(f"  {token:<10s} ERROR: {e}")
                 continue
-            if raw is None:
-                print(f"  {token:<10s} no data")
+            if value is None:
+                print(f"  {token:<10s} no data (empty market-data window)")
                 continue
             any_hit = True
-            parsed = extract_haircut_value(raw)
-            raw_preview = repr(raw)
-            if len(raw_preview) > 200:
-                raw_preview = raw_preview[:200] + "…"
-            print(f"  {token:<10s} parsed={parsed}  raw={raw_preview}")
+            print(f"  {token:<10s} value={value}  symbol={symbol}")
 
         if any_hit:
             print(f"  --> prefix {prefix!r} HAS data — use this one in config.yaml")

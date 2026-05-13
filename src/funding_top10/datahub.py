@@ -19,9 +19,16 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# Default look-back when fetching the latest haircut as a market-data series.
+# The data updates roughly hourly, so 24 h is more than enough to see at
+# least one sample under normal conditions.
+DEFAULT_HAIRCUT_LOOKBACK_HOURS = 24
 
 # Binance USDT-perp denomination prefixes: 1000, 10000, 100000, 1000000, ...
 # These are NOT part of the underlying token name (e.g. 1000FLOKI's haircut is
@@ -139,7 +146,16 @@ def extract_haircut_value(value: Any) -> float | None:
 
 
 class DataHub:
-    """Thin wrapper around nexus_data_hub_sdk.Client for read-only key lookups."""
+    """Thin wrapper around nexus_data_hub_sdk.Client.
+
+    Two read methods:
+      - load_value: latest sequenced value (JSON content), via
+        request_latest_sequenced_data. Used by miscellaneous key-value reads;
+        not used for the haircut path anymore.
+      - load_haircut_value: market-data time-series request via client.request,
+        same call alpha makes via DataHubClient.market_data_request. Returns
+        the latest haircut value parsed from the resulting DataFrame.
+    """
 
     def __init__(self, prefix: str, api_key: str, gateway_url: str,
                  *, api_timeout: float = 30.0):
@@ -162,7 +178,11 @@ class DataHub:
         )
 
     def load_value(self, key: str) -> Any | None:
-        """Return the latest JSON-decoded value for `key`, or None if missing."""
+        """Return the latest JSON-decoded value for `key`, or None if missing.
+
+        For sequenced JSON keys. Use ``load_haircut_value`` for haircut data
+        (which lives under the market-data namespace).
+        """
         full_key = normalize_key(key, self.prefix)
         hub_data = self._client.request_latest_sequenced_data(full_key)
         if hub_data.data is None or hub_data.data.empty:
@@ -173,6 +193,59 @@ class DataHub:
         if content_type == "JSON":
             return json.loads(content)
         return content
+
+    def load_haircut_value(self, symbol: str,
+                           *, lookback_hours: int = DEFAULT_HAIRCUT_LOOKBACK_HOURS) -> float | None:
+        """Fetch the latest haircut for a market-data symbol.
+
+        The underlying call is the same as alpha's
+        ``DataHubClient.market_data_request(symbol, start_time, end_time)`` —
+        the SDK's ``Client.request`` method, which targets the market-data
+        time-series store. No prefix is applied (the SDK handles routing).
+
+        The returned ``HubData.data`` is a DataFrame with one row per sample
+        time, columns including ``sample_time`` and ``haircut`` (a list of
+        tier dicts). We take the latest row's first tier's ``value``.
+
+        Returns ``None`` when no rows are in the lookback window.
+        """
+        end_ms = int(time.time() * 1000)
+        start_ms = end_ms - lookback_hours * 3600 * 1000
+        hub_data = self._client.request(symbol, start_time=start_ms, end_time=end_ms)
+        return parse_haircut_from_market_data_df(hub_data.data)
+
+
+def parse_haircut_from_market_data_df(df: Any) -> float | None:
+    """Pull the latest haircut value from a market-data DataFrame.
+
+    Expected columns: ``sample_time`` (int ms), ``haircut`` (list of dicts
+    with ``left``, ``right``, ``value``). The most recent row's first tier
+    ``value`` is returned.
+    """
+    if df is None:
+        return None
+    try:
+        if df.empty:
+            return None
+    except AttributeError:
+        return None
+
+    if "sample_time" in df.columns:
+        df_sorted = df.sort_values("sample_time")
+    else:
+        df_sorted = df
+    latest = df_sorted.iloc[-1]
+    tiers = latest.get("haircut") if hasattr(latest, "get") else latest["haircut"]
+    if isinstance(tiers, list) and tiers and isinstance(tiers[0], dict):
+        v = tiers[0].get("value")
+        if isinstance(v, (int, float)) and not (isinstance(v, float) and v != v):
+            return float(v)
+        if isinstance(v, str):
+            try:
+                return float(v)
+            except ValueError:
+                return None
+    return None
 
 
 def load_binance_haircuts(datahub: DataHub, tokens: list[str]) -> dict[str, float]:
@@ -202,42 +275,47 @@ def load_binance_haircuts(datahub: DataHub, tokens: list[str]) -> dict[str, floa
             continue
 
         # Try the perp base name first (e.g. '1000FLOKI'), then the underlying
-        # token (e.g. 'FLOKI'). alpha appears to upload haircut data under both
+        # token (e.g. 'FLOKI'). alpha uploads haircut data under both
         # conventions for different tokens, so we don't have to guess.
         candidates = [token]
         stripped = strip_denomination_prefix(token)
         if stripped and stripped != token:
             candidates.append(stripped)
 
-        raw = None
-        used_key: str | None = None
+        value: float | None = None
+        used_symbol: str | None = None
         for candidate in candidates:
-            key = f"BINANCE_MARGIN_{candidate}.HAIRCUT"
+            symbol = f"BINANCE_MARGIN_{candidate}.HAIRCUT"
             try:
-                raw = datahub.load_value(key)
+                value = datahub.load_haircut_value(symbol)
             except Exception as e:  # noqa: BLE001
-                logger.warning("haircut fetch for %s (key=%s) failed: %s", token, key, e)
-                raw = None
+                logger.warning(
+                    "haircut fetch for %s (symbol=%s) failed: %s",
+                    token, symbol, e,
+                )
+                value = None
                 continue
-            if raw is not None:
-                used_key = key
+            if value is not None:
+                used_symbol = symbol
                 break
 
         queried += 1
         if diag_budget > 0:
-            logger.info("haircut diag — token=%s used_key=%s raw=%r", token, used_key, raw)
+            logger.info(
+                "haircut diag — token=%s used_symbol=%s value=%s",
+                token, used_symbol, value,
+            )
             diag_budget -= 1
 
-        if raw is None:
+        if value is None:
             not_found.append(token)
             continue
 
-        parsed = extract_haircut_value(raw)
-        if parsed is not None:
-            haircuts[token] = parsed
-            logger.info("haircut found — token=%s key=%s value=%s", token, used_key, parsed)
-        else:
-            logger.warning("haircut for %s (key=%s) has unrecognised shape: %r", token, used_key, raw)
+        haircuts[token] = value
+        logger.info(
+            "haircut found — token=%s symbol=%s value=%s",
+            token, used_symbol, value,
+        )
 
     if skipped_non_ascii:
         logger.info("Skipped %d non-ASCII token(s) (no DataHub haircut for those)", skipped_non_ascii)

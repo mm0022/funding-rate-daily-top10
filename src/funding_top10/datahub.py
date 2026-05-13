@@ -182,6 +182,8 @@ class DataHub:
         # Lazy import: keeps this module importable in environments where the
         # SDK isn't installed (e.g. CI, mac dev box).
         from nexus_data_hub_sdk import Client  # noqa: PLC0415
+        _patch_sdk_move_file_for_windows_av()
+
         self.prefix = prefix
 
         # Resolve the SDK's local cache dir to somewhere we can definitely write.
@@ -200,6 +202,40 @@ class DataHub:
             updated_exception=False,
             directory=cache_dir,
         )
+
+
+_sdk_move_file_patched = False
+
+
+def _patch_sdk_move_file_for_windows_av() -> None:
+    """Replace nexus_data_hub_sdk.FileHelper.move_file with a plain os.rename.
+
+    The SDK's original does ``os.chmod(src, READ_ONLY) + os.rename(src, dst)``.
+    Corporate endpoint AV on Windows often treats "chmod-readonly then rename"
+    as ransomware-staging and denies the rename with WinError 5. A plain
+    rename without the chmod doesn't trip that heuristic.
+
+    Idempotent: only patches on first call.
+    """
+    global _sdk_move_file_patched
+    if _sdk_move_file_patched:
+        return
+
+    try:
+        from nexus_data_hub_sdk.util import file_helper as _fh  # noqa: PLC0415
+    except ImportError:
+        return  # SDK not installed; nothing to patch
+
+    original = _fh.FileHelper.move_file
+
+    def _move_no_chmod(src_file_name: str, desc_file_name: str) -> None:
+        if src_file_name and desc_file_name and os.path.exists(src_file_name):
+            os.rename(src_file_name, desc_file_name)
+
+    _fh.FileHelper.move_file = staticmethod(_move_no_chmod)
+    _sdk_move_file_patched = True
+    logger.info("nexus_data_hub_sdk.FileHelper.move_file patched (no chmod) to dodge Windows AV")
+    del original  # unused; kept reference avoidance
 
     def load_value(self, key: str) -> Any | None:
         """Return the latest JSON-decoded value for `key`, or None if missing.

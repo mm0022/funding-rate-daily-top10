@@ -18,11 +18,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# Local cache directory the nexus_data_hub_sdk uses to spool downloaded
+# market-data files. Defaults to "./.data" which on Windows often fails
+# with WinError 5 (access denied) — write to the system temp dir instead.
+DEFAULT_SDK_CACHE_DIR = os.path.join(tempfile.gettempdir(), "funding_top10_datahub")
 
 
 # Default look-back for the haircut market-data query. We open the window
@@ -164,7 +172,8 @@ class DataHub:
     """
 
     def __init__(self, prefix: str, api_key: str, gateway_url: str,
-                 *, api_timeout: float = 30.0):
+                 *, api_timeout: float = 30.0,
+                 cache_directory: str | None = None):
         if not prefix or not api_key or not gateway_url:
             raise ValueError(
                 "DataHub requires non-empty prefix, api_key, and gateway_url. "
@@ -174,6 +183,14 @@ class DataHub:
         # SDK isn't installed (e.g. CI, mac dev box).
         from nexus_data_hub_sdk import Client  # noqa: PLC0415
         self.prefix = prefix
+
+        # Resolve the SDK's local cache dir to somewhere we can definitely write.
+        # The SDK's default is './.data' (relative to CWD) which fails with
+        # WinError 5 on locked-down Windows. Pre-create the dir so the SDK
+        # doesn't have to.
+        cache_dir = cache_directory or DEFAULT_SDK_CACHE_DIR
+        os.makedirs(cache_dir, exist_ok=True)
+
         self._client = Client(
             api_key=api_key,
             gateway_url=gateway_url,
@@ -181,6 +198,7 @@ class DataHub:
             route_meta_uri="",
             missing_exception=False,
             updated_exception=False,
+            directory=cache_dir,
         )
 
     def load_value(self, key: str) -> Any | None:

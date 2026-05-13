@@ -213,16 +213,44 @@ def build_message(
 
 
 def post_to_slack(webhook_url: str, message: str, *, proxy: str = "",
-                  timeout: float = 15.0) -> None:
+                  timeout: float = 15.0, max_retries: int = 3) -> None:
     """POST a plain-text message to a Slack incoming webhook. Raises on non-2xx.
 
     proxy: if non-empty, the POST routes through this URL. trust_env is False,
     so ambient HTTP_PROXY env vars are NOT consulted — the proxy comes only
     from config.yaml.
+
+    Retries up to ``max_retries`` times on transient connection errors
+    (proxy / Slack closing the connection mid-flight, etc.) with simple
+    exponential back-off.
     """
+    import logging
+    import time as _time
+
+    logger = logging.getLogger(__name__)
+
     client_kwargs: dict = {"trust_env": False}
     if proxy:
         client_kwargs["proxy"] = proxy
-    with httpx.Client(**client_kwargs) as client:
-        resp = client.post(webhook_url, json={"text": message}, timeout=timeout)
-        resp.raise_for_status()
+
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            with httpx.Client(**client_kwargs) as client:
+                resp = client.post(webhook_url, json={"text": message}, timeout=timeout)
+                resp.raise_for_status()
+                return
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError,
+                httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+            last_exc = e
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                logger.warning(
+                    "Slack POST attempt %d failed (%s); retrying in %ds",
+                    attempt + 1, type(e).__name__, wait,
+                )
+                _time.sleep(wait)
+                continue
+            raise
+    if last_exc:
+        raise last_exc

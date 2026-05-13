@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import math
 import statistics
 import time
@@ -26,6 +27,8 @@ from urllib.parse import urlencode
 
 import httpx
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 FAPI_BASE = "https://fapi.binance.com"
@@ -74,11 +77,39 @@ def _sign(query_string: str, secret: str) -> str:
 async def fetch_collateral_rates(client: httpx.AsyncClient, api_key: str,
                                  api_secret: str) -> list[dict]:
     """All-asset collateral rates from Portfolio Margin sapi. Signed."""
-    params = {"timestamp": int(time.time() * 1000)}
+    params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
     qs = urlencode(params)
     sig = _sign(qs, api_secret)
     url = f"{SAPI_BASE}/sapi/v1/portfolio/collateralRate?{qs}&signature={sig}"
     return await _get_json(client, url, headers={"X-MBX-APIKEY": api_key})
+
+
+async def fetch_collateral_rates_safe(client: httpx.AsyncClient, api_key: str,
+                                      api_secret: str) -> list[dict]:
+    """Fetch collateral rates; on failure log a warning + Binance's response
+    body and return [] so the rest of the report can still be produced.
+
+    Common reasons this fails:
+      - account is not Portfolio Margin enabled (this endpoint is PM-only)
+      - API key lacks required permissions
+      - server clock skew (timestamp outside recvWindow)
+      - signature error
+    """
+    if not api_key or not api_secret:
+        return []
+    try:
+        return await fetch_collateral_rates(client, api_key, api_secret)
+    except httpx.HTTPStatusError as e:
+        body = e.response.text[:1000] if e.response is not None else ""
+        status = e.response.status_code if e.response is not None else "?"
+        logger.warning(
+            "collateralRate fetch failed: HTTP %s — %s. haircut column will be NaN.",
+            status, body,
+        )
+        return []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("collateralRate fetch failed: %s. haircut column will be NaN.", e)
+        return []
 
 
 def _is_usdt_perp(symbol: str) -> bool:
@@ -127,16 +158,11 @@ async def _fetch_all_async(api_key: str, api_secret: str, proxy: str = "") -> pd
 
         history_coros = [bounded(fetch_funding_history(client, s, days=7)) for s in symbols]
         oi_coros = [bounded(fetch_open_interest(client, s)) for s in symbols]
-        collat_coro = (
-            fetch_collateral_rates(client, api_key, api_secret)
-            if api_key and api_secret
-            else asyncio.sleep(0, result=[])
-        )
 
         histories, ois, collat = await asyncio.gather(
             asyncio.gather(*history_coros, return_exceptions=True),
             asyncio.gather(*oi_coros, return_exceptions=True),
-            collat_coro,
+            fetch_collateral_rates_safe(client, api_key, api_secret),
             return_exceptions=False,
         )
 

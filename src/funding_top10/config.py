@@ -70,6 +70,7 @@ class ScoreConfig:
 class BiyiConfig:
     base_url: str           # internal strategy API base URL
     query: str              # free-form query string passed to /strategies/list
+                            # (server-side filters: $accountMap, $maxPositionQty, …)
 
 
 @dataclass(frozen=True)

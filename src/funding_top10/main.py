@@ -18,7 +18,7 @@ import logging  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from funding_top10.binance_api import fetch_funding_dataframe  # noqa: E402
-from funding_top10.biyi_api import fetch_biyi_tickers as fetch_biyi_tickers_api  # noqa: E402
+from funding_top10.biyi_api import fetch_biyi_positions  # noqa: E402
 from funding_top10.config import load_config  # noqa: E402
 from funding_top10.datahub import DataHub, load_binance_haircuts  # noqa: E402
 from funding_top10.scoring import ScoreWeights, select_rows_to_show  # noqa: E402
@@ -40,9 +40,18 @@ def main() -> int:
     funding_df = fetch_funding_dataframe(proxy=cfg.proxy)
     logger.info("Got %d BINANCE-U USDT-perp rows from Binance API", len(funding_df))
 
-    logger.info("Fetching biyi tickers from %s (query=%r)…", cfg.biyi.base_url, cfg.biyi.query)
-    biyi = fetch_biyi_tickers_api(base_url=cfg.biyi.base_url, query=cfg.biyi.query)
-    logger.info("Got %d biyi tickers from API", len(biyi))
+    logger.info("Fetching biyi positions from %s (query=%r)…", cfg.biyi.base_url, cfg.biyi.query)
+    biyi_positions = fetch_biyi_positions(base_url=cfg.biyi.base_url, query=cfg.biyi.query)
+    biyi = [p["ticker"] for p in biyi_positions]
+    position_by_ticker = {p["ticker"]: float(p["position_usd"]) for p in biyi_positions}
+    total_position_usd = sum(position_by_ticker.values())
+    logger.info(
+        "Got %d biyi tickers from API (total position_usd=%.2f)",
+        len(biyi), total_position_usd,
+    )
+    for p in biyi_positions:
+        pct = (p["position_usd"] / total_position_usd) if total_position_usd > 0 else 0.0
+        logger.info("  biyi %-16s  pos=%.2f  pct=%.2f%%", p["ticker"], p["position_usd"], pct * 100)
 
     # Haircut: query DataHub for ALL Binance USDT-perp bases + biyi. The new
     # ranking by composite score needs every symbol's haircut (BTC/ETH have
@@ -99,7 +108,13 @@ def main() -> int:
     logger.info("Merged display set: %d rows (top by confidence-bound score ∪ biyi)", len(merged))
 
     today_beijing = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
-    message = build_message(merged, biyi, report_date_str=today_beijing)
+    message = build_message(
+        merged,
+        biyi,
+        report_date_str=today_beijing,
+        position_by_ticker=position_by_ticker,
+        total_position_usd=total_position_usd,
+    )
 
     logger.info("Posting to Slack (proxy=%s)…", proxy_repr)
     post_to_slack(cfg.slack.webhook, message, proxy=cfg.proxy)

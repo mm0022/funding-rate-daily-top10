@@ -13,8 +13,11 @@ qijia:
 biyi:
   # Internal biyi strategy API base URL. /strategies/list is the endpoint.
   base_url: "https://biyi.tky.laozi.pro/biyi/api"
-  # Free-form filter query passed to the API. Empty = return all strategies.
-  # Example: "strategyName like 'LONGSHORT_BINANCE%'"
+  # Server-side query expression. biyi_api always appends
+  # "$productType like SM-PU|SS-PU" (matches alpha). Add account / position
+  # filters here, e.g.
+  #   "$accountMap like XXX and $maxPositionQty gt 10"
+  # Empty = no extra filter.
   query: ""
 
 slack:

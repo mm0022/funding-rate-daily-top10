@@ -5,15 +5,16 @@ sorted by sum_7d_funding_rate desc. Biyi rows are flagged with 🔴 in a
 dedicated leading column so column alignment is not affected by emoji width.
 
 Columns (in order):
-  flag | exchange | symbol(base) | timestamp | funding(bp) |
-  3d_apr% | 7d_apr% | std_7d(bp) | OI | haircut
+  flag | exchange | symbol(base) | timestamp | int | funding(bp) |
+  3d_apr% | 7d_apr% | std_7d_y% | OI | haircut | score | pos | pct%
 
 - funding(bp):  raw funding_rate × 10000, no fixed decimals (Python ``:g``).
 - 3d_apr% / 7d_apr%: annualized return from sum of funding over the last 3/7
   days: ``sum × 365 / N_days × 100``. This is INDEPENDENT of the per-symbol
   funding cadence (1h/4h/8h) because sum captures total funding paid.
-- std_7d(bp):  per-event funding stddev × 10000. Not annualized — its scale
-  depends on the funding cadence, so it's a within-symbol indicator only.
+- std_7d_y%: per-event funding stddev annualized to %, cadence-adjusted.
+- pos / pct%: biyi position size (USD) and its share of total biyi position.
+  Non-biyi rows leave these blank.
 """
 
 from __future__ import annotations
@@ -179,7 +180,8 @@ def _fmt_interval(h) -> str:
 
 _BODY_FMT = (
     "{flag}{exchange:<10s} {symbol:<16s} {ts:<11s} {fint:>4s} "
-    "{fr:>11s} {apr3:>9s} {apr7:>9s} {sy:>11s} {oi:>12s} {hc:>9s} {sc:>7s}"
+    "{fr:>11s} {apr3:>9s} {apr7:>9s} {sy:>11s} {oi:>12s} {hc:>9s} {sc:>7s} "
+    "{pos:>10s} {pct:>7s}"
 )
 
 
@@ -197,19 +199,39 @@ def _header_line() -> str:
         oi="OI",
         hc="haircut",
         sc="score",
+        pos="pos",
+        pct="pct%",
     )
 
 
-def _row_line(row: pd.Series, biyi_set: set[str]) -> str:
+def _row_line(
+    row: pd.Series,
+    biyi_set: set[str],
+    position_by_ticker: dict[str, float],
+    total_position_usd: float,
+) -> str:
     base = row.get("base") if "base" in row else None
     quote = row.get("quote") if "quote" in row else None
     ticker = f"{base}/{quote}" if base is not None and quote is not None else ""
-    flag = HIGHLIGHT if ticker in biyi_set else NO_FLAG
+    is_biyi = ticker in biyi_set
+    flag = HIGHLIGHT if is_biyi else NO_FLAG
 
     if base is not None and quote is not None:
         symbol_display = ticker[:16]
     else:
         symbol_display = str(row.get("symbol") or "n/a")[:16]
+
+    if is_biyi:
+        pos_usd = position_by_ticker.get(ticker, 0.0)
+        pos_str = _fmt_human_usd(pos_usd)
+        pct_str = (
+            _fmt_pct_value(pos_usd / total_position_usd, 1)
+            if total_position_usd > 0
+            else "n/a"
+        )
+    else:
+        pos_str = ""
+        pct_str = ""
 
     return _BODY_FMT.format(
         flag=flag,
@@ -224,6 +246,8 @@ def _row_line(row: pd.Series, biyi_set: set[str]) -> str:
         oi=_fmt_human_usd(row.get("open_interest_value")),
         hc=_fmt_float(row.get("haircut"), 2),
         sc=_fmt_score(row.get("score")),
+        pos=pos_str,
+        pct=pct_str,
     )
 
 
@@ -231,16 +255,26 @@ def build_message(
     rows_df: pd.DataFrame,
     biyi_tickers: Iterable[str],
     report_date_str: str,
+    *,
+    position_by_ticker: dict[str, float] | None = None,
+    total_position_usd: float = 0.0,
 ) -> str:
-    """Render the merged Top10 + biyi table for Slack."""
+    """Render the merged Top10 + biyi table for Slack.
+
+    ``position_by_ticker`` maps biyi ticker -> position_usd (sum of
+    maxPositionQty across that ticker's strategies). ``total_position_usd`` is
+    the denominator used for the per-row pct% column. Both default to empty
+    so callers / tests written before the pos/pct columns existed still work.
+    """
     biyi_set = set(biyi_tickers)
+    pos_map = position_by_ticker or {}
     lines: list[str] = [
         f"*Funding Score Top N ∪ Biyi (BINANCE-U) — {report_date_str}*",
         "```",
         _header_line(),
     ]
     for _, row in rows_df.iterrows():
-        lines.append(_row_line(row, biyi_set))
+        lines.append(_row_line(row, biyi_set, pos_map, total_position_usd))
     lines.append("```")
 
     if biyi_set:

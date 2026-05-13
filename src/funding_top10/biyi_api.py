@@ -1,14 +1,19 @@
 """Biyi strategy API client.
 
-Replaces the previous SQL query against biyi_strategy_data_his. Hits the
-internal POST /biyi/api/strategies/list endpoint (same as alpha's
-funding_clients/strategy_info.py:DataApiClient.load_strategy_info), extracts
-the ``tickers`` from each returned strategy, dedupes, and returns the flat
-"BASE/QUOTE" list the rest of the pipeline expects.
+Mirrors alpha's funding/funding_service.py:FundingService.load_current_position:
+  - POST /biyi/api/strategies/list with body {"query": "<user_query> and $productType like SM-PU|SS-PU"}
+  - keep only strategies where strategyType == "LONGSHORT"
+  - return aggregated per-ticker positions
+    (ticker + position_usd + strategy_names + accounts). Same shape as alpha's
+    DataFrame (ticker, position_usd, token), summed when the same symbol
+    appears in multiple strategies.
 
-The endpoint is internal (biyi.tky.laozi.pro) and historically reachable
-without going through the corporate proxy. We default ``trust_env=False`` +
-no proxy; pass a proxy explicitly if your network needs one.
+Account / minPositionQty filtering lives in the caller-supplied ``query`` —
+server-side query expression handles them, e.g.:
+    $accountMap like XXX and $maxPositionQty gt 10
+
+No auth headers — alpha's BaseApiClient calls this endpoint with a plain
+httpx.Client and biyi auto-trusts it from the internal network.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_BASE_URL = "https://biyi.tky.laozi.pro/biyi/api"
+PRODUCT_TYPE_SUFFIX = "$productType like SM-PU|SS-PU"
 
 
 class BiyiApiClient:
@@ -47,8 +53,7 @@ class BiyiApiClient:
     def list_strategies(self, query: str = "") -> list[dict]:
         """POST /strategies/list. Returns the list of strategy dicts.
 
-        ``query`` is a free-form filter string passed straight to the API
-        (caller's responsibility to know the syntax — empty = all).
+        ``query`` is passed as-is to the API. Empty string = no filter.
         """
         url = f"{self.base_url}/strategies/list"
         payload = {"query": query} if query else {}
@@ -60,27 +65,71 @@ class BiyiApiClient:
         return data.get("data") or []
 
 
-def extract_tickers(strategies: list[dict]) -> list[str]:
-    """Pull all BASE/QUOTE tickers from a list of strategy dicts (deduped, sorted).
+def _join_query(user_query: str) -> str:
+    """Append the productType filter that alpha always uses."""
+    user_query = (user_query or "").strip()
+    if PRODUCT_TYPE_SUFFIX in user_query:
+        return user_query
+    if user_query:
+        return f"{user_query} and {PRODUCT_TYPE_SUFFIX}"
+    return PRODUCT_TYPE_SUFFIX
 
-    Each strategy may have either ``tickers`` (list[str]) or a single
-    ``ticker`` (str) — extract whatever's present.
+
+def filter_longshort(strategies: list[dict]) -> list[dict]:
+    """Keep only strategyType == 'LONGSHORT' (mirror alpha's assertion)."""
+    return [s for s in strategies if s.get("strategyType") == "LONGSHORT"]
+
+
+def aggregate_positions(strategies: list[dict]) -> list[dict]:
+    """Collapse strategies into per-ticker positions.
+
+    Output: ``[{ticker, position_usd}, ...]`` — ``position_usd`` sums
+    ``maxPositionQty`` across strategies on the same ticker. Anything else
+    the biyi API returns (strategyName, accountMap, …) is dropped.
     """
-    out: set[str] = set()
+    agg: dict[str, float] = {}
     for s in strategies:
-        for t in s.get("tickers") or []:
-            if isinstance(t, str) and t:
-                out.add(t)
-        single = s.get("ticker")
-        if isinstance(single, str) and single:
-            out.add(single)
-    return sorted(out)
+        t = s.get("ticker")
+        if not isinstance(t, str) or "/" not in t:
+            continue
+        try:
+            qty = float(s.get("maxPositionQty") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        agg[t] = agg.get(t, 0.0) + qty
+    return [
+        {"ticker": t, "position_usd": q}
+        for t, q in sorted(agg.items())
+    ]
 
 
-def fetch_biyi_tickers(base_url: str = DEFAULT_BASE_URL, *,
-                       query: str = "", proxy: str = "",
-                       timeout: float = 15.0) -> list[str]:
-    """One-shot helper: open a client, call /strategies/list, return tickers."""
+def fetch_biyi_positions(
+    base_url: str = DEFAULT_BASE_URL,
+    *,
+    query: str = "",
+    proxy: str = "",
+    timeout: float = 15.0,
+) -> list[dict]:
+    """Top-level helper used by main.py.
+
+    ``query`` is the caller-supplied filter prefix; the productType filter alpha
+    always uses is appended automatically. Account / minPositionQty filtering
+    belong in ``query`` (server-side), e.g.
+    ``$accountMap like XXX and $maxPositionQty gt 10``.
+
+    Returns aggregated per-ticker positions; ``maxPositionQty`` is treated as
+    USD notional (matching alpha's ``position_usd = float(maxPositionQty)``).
+    """
+    full_query = _join_query(query)
+    logger.info("biyi /strategies/list query=%r", full_query)
+
     with BiyiApiClient(base_url=base_url, timeout=timeout, proxy=proxy) as c:
-        strategies = c.list_strategies(query=query)
-    return extract_tickers(strategies)
+        strategies = c.list_strategies(query=full_query)
+
+    kept = filter_longshort(strategies)
+    positions = aggregate_positions(kept)
+    logger.info(
+        "biyi returned %d strategies, %d after LONGSHORT filter, %d unique tickers",
+        len(strategies), len(kept), len(positions),
+    )
+    return positions

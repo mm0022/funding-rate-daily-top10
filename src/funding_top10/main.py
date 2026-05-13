@@ -75,6 +75,17 @@ def main() -> int:
     # but the value is still rendered as "0.00" in the table rather than "n/a".
     funding_df["haircut"] = funding_df["base"].astype(str).map(haircuts).fillna(0.0)
 
+    # Visibility: log haircut for each biyi token so it's obvious in the cmd
+    # console whether DataHub gave us a value or not (no log-file dig needed).
+    for biyi_base in sorted(biyi_bases):
+        in_dict = haircuts.get(biyi_base)
+        row_value = funding_df.loc[funding_df["base"].astype(str) == biyi_base, "haircut"]
+        in_row = float(row_value.iloc[0]) if not row_value.empty else None
+        logger.info(
+            "biyi haircut check — base=%s in_dict=%s in_df=%s",
+            biyi_base, in_dict, in_row,
+        )
+
     merged = select_rows_to_show(funding_df, biyi)
     logger.info("Merged display set: %d rows (top20 haircut>=0.5 ∪ biyi)", len(merged))
 

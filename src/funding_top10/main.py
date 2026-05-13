@@ -14,8 +14,6 @@ if str(_SRC_DIR) not in sys.path:
 
 import datetime  # noqa: E402
 import logging  # noqa: E402
-import os  # noqa: E402
-from contextlib import contextmanager  # noqa: E402
 
 import pandas as pd  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
@@ -30,25 +28,6 @@ logger = logging.getLogger(__name__)
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 
-# DB lives on the internal network and must NOT go through the corp HTTP proxy.
-# Slack does need the proxy. The context manager unsets the proxy env vars only
-# for the DB block; on exit they are restored so the Slack POST can use them.
-_PROXY_KEYS = (
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-    "http_proxy", "https_proxy", "all_proxy",
-)
-
-
-@contextmanager
-def proxy_off():
-    saved = {k: os.environ.pop(k, None) for k in _PROXY_KEYS}
-    try:
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is not None:
-                os.environ[k] = v
-
 
 def fetch_biyi_tickers(engine, lookback_interval: str = "1 day") -> list[str]:
     with engine.connect() as conn:
@@ -59,15 +38,19 @@ def fetch_biyi_tickers(engine, lookback_interval: str = "1 day") -> list[str]:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config()
+    proxy_repr = cfg.proxy or "(none)"
 
-    logger.info("Fetching funding/OI/haircut from Binance API…")
-    funding_df = fetch_funding_dataframe(cfg.binance.api_key, cfg.binance.api_secret)
+    logger.info("Fetching funding/OI/haircut from Binance API (proxy=%s)…", proxy_repr)
+    funding_df = fetch_funding_dataframe(
+        cfg.binance.api_key, cfg.binance.api_secret, proxy=cfg.proxy
+    )
     logger.info("Got %d BINANCE-U USDT-perp rows from Binance API", len(funding_df))
 
-    with proxy_off():
-        engine = create_engine(cfg.qijia.to_dsn())
-        biyi = fetch_biyi_tickers(engine)
-        logger.info("Got %d biyi tickers from DB (last 24h)", len(biyi))
+    # DB uses psycopg2 — it doesn't consult HTTP_PROXY env vars at all. We pass
+    # nothing here; the DSN drives the TCP connection directly.
+    engine = create_engine(cfg.qijia.to_dsn())
+    biyi = fetch_biyi_tickers(engine)
+    logger.info("Got %d biyi tickers from DB (last 24h)", len(biyi))
 
     merged = select_rows_to_show(funding_df, biyi)
     logger.info("Merged display set: %d rows (top10 haircut>=0.5 ∪ biyi)", len(merged))
@@ -75,8 +58,8 @@ def main() -> int:
     today_beijing = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
     message = build_message(merged, biyi, report_date_str=today_beijing)
 
-    logger.info("Posting to Slack [proxy restored]…")
-    post_to_slack(cfg.slack.webhook, message)
+    logger.info("Posting to Slack (proxy=%s)…", proxy_repr)
+    post_to_slack(cfg.slack.webhook, message, proxy=cfg.proxy)
     logger.info("Done.")
     return 0
 

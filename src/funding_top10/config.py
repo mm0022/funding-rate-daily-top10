@@ -49,6 +49,7 @@ class Config:
     qijia: QijiaConfig
     slack: SlackConfig
     binance: BinanceConfig
+    proxy: str  # full URL, e.g. "http://proxy.host:8080"; empty disables proxy
 
 
 _REQUIRED_QIJIA = ("host", "port", "user", "password", "database")
@@ -73,6 +74,7 @@ def load_config(path: Path | None = None) -> Config:
     qijia_raw = raw.get("qijia") or {}
     slack_raw = raw.get("slack") or {}
     binance_raw = raw.get("binance") or {}
+    proxy_raw = raw.get("proxy") or ""
 
     missing_qijia = [k for k in _REQUIRED_QIJIA if not qijia_raw.get(k)]
     if missing_qijia:
@@ -99,4 +101,5 @@ def load_config(path: Path | None = None) -> Config:
             api_key=str(binance_raw.get("api_key") or ""),
             api_secret=str(binance_raw.get("api_secret") or ""),
         ),
+        proxy=str(proxy_raw or ""),
     )

@@ -106,14 +106,21 @@ def _aggregate(history: list[dict], *, now_ms: int, days: int) -> tuple[float, l
     return (sum(rates), rates)
 
 
-async def _fetch_all_async(api_key: str, api_secret: str) -> pd.DataFrame:
+async def _fetch_all_async(api_key: str, api_secret: str, proxy: str = "") -> pd.DataFrame:
     sem = asyncio.Semaphore(MAX_CONCURRENCY)
 
     async def bounded(coro):
         async with sem:
             return await coro
 
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+    # trust_env=False: ignore ambient HTTP_PROXY env vars; proxy comes only from
+    # the explicit `proxy` arg (sourced from config.yaml). Avoids surprises from
+    # whatever the shell happens to have set.
+    client_kwargs: dict = {"timeout": HTTP_TIMEOUT, "trust_env": False}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+
+    async with httpx.AsyncClient(**client_kwargs) as client:
         premium = await fetch_premium_index_all(client)
         usdt_rows = [p for p in premium if _is_usdt_perp(str(p.get("symbol", "")))]
         symbols = [p["symbol"] for p in usdt_rows]
@@ -204,10 +211,13 @@ async def _fetch_all_async(api_key: str, api_secret: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def fetch_funding_dataframe(api_key: str, api_secret: str) -> pd.DataFrame:
+def fetch_funding_dataframe(api_key: str, api_secret: str, proxy: str = "") -> pd.DataFrame:
     """Sync entrypoint: fetch all Binance data and return the DataFrame.
 
     api_key / api_secret may be empty; in that case the haircut column is all NaN
     (only the signed collateralRate endpoint needs auth).
+
+    proxy: if non-empty, all HTTP calls route through this URL (e.g.
+    "http://proxy.company.com:8080"). If empty, calls go direct.
     """
-    return asyncio.run(_fetch_all_async(api_key, api_secret))
+    return asyncio.run(_fetch_all_async(api_key, api_secret, proxy))

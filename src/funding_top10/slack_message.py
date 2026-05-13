@@ -212,7 +212,17 @@ def build_message(
     return "\n".join(lines)
 
 
-def post_to_slack(webhook_url: str, message: str, *, timeout: float = 15.0) -> None:
-    """POST a plain-text message to a Slack incoming webhook. Raises on non-2xx."""
-    resp = httpx.post(webhook_url, json={"text": message}, timeout=timeout)
-    resp.raise_for_status()
+def post_to_slack(webhook_url: str, message: str, *, proxy: str = "",
+                  timeout: float = 15.0) -> None:
+    """POST a plain-text message to a Slack incoming webhook. Raises on non-2xx.
+
+    proxy: if non-empty, the POST routes through this URL. trust_env is False,
+    so ambient HTTP_PROXY env vars are NOT consulted — the proxy comes only
+    from config.yaml.
+    """
+    client_kwargs: dict = {"trust_env": False}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+    with httpx.Client(**client_kwargs) as client:
+        resp = client.post(webhook_url, json={"text": message}, timeout=timeout)
+        resp.raise_for_status()

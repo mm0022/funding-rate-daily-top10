@@ -20,3 +20,8 @@ binance:
   # Leave blank to skip haircut fetching — the haircut column will be NaN.
   api_key: ""
   api_secret: ""
+
+# HTTP/HTTPS proxy URL used for BOTH the Binance API calls and the Slack webhook
+# POST (any outbound HTTP). Internal DB (psycopg2) does not use this. Empty
+# string = no proxy. Example: "http://proxy.company.com:8080"
+proxy: ""

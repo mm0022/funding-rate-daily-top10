@@ -19,8 +19,12 @@ first).
 
 from __future__ import annotations
 
+import logging
 import sys
+import time
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # Make src/ importable without requiring `pip install -e .`.
 _HERE = Path(__file__).resolve().parent
@@ -70,16 +74,40 @@ def main() -> int:
         any_hit = False
         for token in tokens:
             symbol = f"BINANCE_MARGIN_{token}.HAIRCUT"
+            # Call the raw SDK twice (mirroring alpha's is_backfill) so we can
+            # introspect the returned HubData shape directly, not just the
+            # parsed haircut value.
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - 30 * 24 * 3600 * 1000
             try:
-                value = dh.load_haircut_value(symbol)
+                raw1 = dh._client.request(symbol, start_time=start_ms, end_time=now_ms)
+                shape1 = None if raw1.data is None else raw1.data.shape
+                print(f"  {token:<10s} attempt1 [start, now] shape={shape1}")
+                if raw1.data is None or raw1.data.empty:
+                    far_ms = 9_999_999_999_999
+                    raw2 = dh._client.request(symbol, start_time=start_ms, end_time=far_ms)
+                    shape2 = None if raw2.data is None else raw2.data.shape
+                    print(f"  {token:<10s} attempt2 [start, MAX] shape={shape2}")
+                    if raw2.data is not None and not raw2.data.empty:
+                        print(f"  {token:<10s} columns={list(raw2.data.columns)}")
+                        print(f"  {token:<10s} first row: {raw2.data.iloc[0].to_dict()}")
+                else:
+                    print(f"  {token:<10s} columns={list(raw1.data.columns)}")
+                    print(f"  {token:<10s} first row: {raw1.data.iloc[0].to_dict()}")
             except Exception as e:  # noqa: BLE001
                 print(f"  {token:<10s} ERROR: {e}")
                 continue
+
+            try:
+                value = dh.load_haircut_value(symbol)
+            except Exception as e:  # noqa: BLE001
+                print(f"  {token:<10s} load_haircut_value ERROR: {e}")
+                continue
             if value is None:
-                print(f"  {token:<10s} no data (empty market-data window)")
+                print(f"  {token:<10s} parsed=None (no data in window)")
                 continue
             any_hit = True
-            print(f"  {token:<10s} value={value}  symbol={symbol}")
+            print(f"  {token:<10s} parsed value={value}  symbol={symbol}")
 
         if any_hit:
             print(f"  --> prefix {prefix!r} HAS data — use this one in config.yaml")

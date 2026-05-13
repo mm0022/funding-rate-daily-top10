@@ -1,92 +1,121 @@
 # funding-top10
 
-Daily Slack report: top 10 BINANCE-U funding-rate symbols (high mean, low std over the past 7 days) plus the list of biyi `LONGSHORT_BINANCE*` tickers traded with `max_position > 1000` USD in the last 24h. Tickers that are in *both* lists are flagged with 🟨 in the Top 10 table.
+每日 Slack 报告：BINANCE-U USDT 永续合约里，按"置信下界年化收益"打分排前 N 的标的，并强制并入 biyi LONGSHORT 策略当前持仓的所有币。报告每天 08:00 北京时间通过 Windows Task Scheduler 触发，详见 `deploy/README.md`。
 
-## What it does
+## 数据来源
 
-1. Fetch from Binance public/signed APIs (USDT-quoted BINANCE-U perps only):
-   - latest funding rate + mark price (`/fapi/v1/premiumIndex`)
-   - past 7 days of funding events per symbol (`/fapi/v1/fundingRate`)
-   - current open interest per symbol (`/fapi/v1/openInterest`)
-   - per-asset collateral rate / "haircut" (`/sapi/v1/portfolio/collateralRate`, **signed**)
-2. Compute per-symbol `sum_3d_funding_rate`, `sum_7d_funding_rate`, `std_7d_funding_rate` from history; convert OI to USD via mark price.
-3. Rank: top 50 by `sum_7d_funding_rate` desc → top 10 of those by `std_7d_funding_rate` asc (haircut must be >= 0.5).
-4. Query `biyi_strategy_data_his` (qijia DB) for distinct tickers with strategy `LONGSHORT_BINANCE*` and `max_position_in_usd > 1000` in the last 24h.
-5. Build a Slack message: merged Top 10 ∪ biyi rows, sorted by `sum_7d_funding_rate` desc. Biyi rows are prefixed with 🔴.
-6. POST to a Slack incoming webhook.
+| 数据 | 来源 | 说明 |
+|------|------|------|
+| funding rate / mark price | Binance `GET /fapi/v1/premiumIndex` | 当前 funding |
+| 历史 7 天 funding 事件 | Binance `GET /fapi/v1/fundingRate` | 算 `sum_3d` / `sum_7d` / `std_7d` |
+| funding 周期（1h/4h/8h） | Binance `GET /fapi/v1/fundingInfo` | 用于 std 年化 |
+| open interest | Binance `GET /fapi/v1/openInterest` | × mark 转 USD |
+| haircut（折扣率） | DataHub (`nexus_data_hub_sdk`) | 内网网关；并行 10 worker 抓 |
+| biyi 持仓 | `POST https://biyi.tky.laozi.pro/biyi/api/strategies/list` | 内网无 auth；query 见下 |
 
-Designed to run daily at 08:00 Beijing time on a Windows machine via Task Scheduler — see `deploy/README.md`.
+## 处理流程
 
-## Project layout
+```
+                    ┌─ Binance fapi ──→ funding_df  (funding / OI / std_7d / interval)
+                    │
+main.py  ─────────┬─┤
+                  │ ├─ biyi /strategies/list ──→ positions  (ticker, position_usd)
+                  │ │
+                  │ └─ DataHub ──→ haircut[base]
+                  │
+                  ▼
+            scoring.select_rows_to_show
+                  │   1. std_7d 按 funding 周期年化:  std × sqrt((24/h) × 365)
+                  │   2. 硬过滤:  haircut ≥ min_haircut  且  OI ≥ min_oi_usd
+                  │   3. score = annualized_apr − z × annualized_std
+                  │            annualized_apr = sum_7d × 365 / 7
+                  │      z=1.645 ⇔ 单侧 95% 置信下界（"该置信度下年化至少能赚到这么多"）
+                  │   4. 按 score 降序取 top N
+                  │   5. 把 biyi 的 ticker 强制并入（不论排名 / 是否过硬过滤）
+                  ▼
+            slack_message.build_message
+                  │   一张表，按 score 降序
+                  │   biyi 行用 🔴 标记，并多两列: pos（持仓 USD） / pct%（占 biyi 总仓位）
+                  ▼
+            slack_message.post_to_slack  → Slack incoming webhook
+```
+
+## 评分细节
+
+打分公式只用 funding 数据：
+
+```
+score = (sum_7d_funding_rate × 365 / 7) − z × std_7d_annualized
+```
+
+- **不包含 haircut / OI**：这两个是硬过滤，过不了就出局，不在 score 里"换分"
+- **z 可配**：`score.confidence_z` — 1.0 ≈ 84%, 1.645 ≈ 95% (默认), 2.0 ≈ 97.7%
+- **biyi 并入**：biyi 持有的币即使没过 haircut/OI 硬过滤、即使 score 排不上，也会出现在表里（用于持续监控自己的仓位）
+
+## 项目结构
 
 ```
 funding-rate-daily-top10/
 ├── src/funding_top10/
-│   ├── config.py          config.yaml loader (qijia DB + slack + binance keys)
-│   ├── binance_api.py     async client for fapi/sapi (funding/OI/haircut)
-│   ├── queries.py         the biyi SQL (only DB query left)
-│   ├── scoring.py         top50-by-sum-7d → top10-by-std-7d
-│   ├── slack_message.py   build + post the message
-│   └── main.py            entry point: fetch (API + DB) → rank → post
-├── tests/                 unit tests
-├── deploy/                Windows Task Scheduler bat + README
-├── requirements.txt
-├── pyproject.toml
-└── config.yaml.example
+│   ├── config.py          load_config()，YAML → 各 dataclass
+│   ├── binance_api.py     async httpx 抓 fapi（funding / OI / interval）
+│   ├── biyi_api.py        POST /strategies/list → [{ticker, position_usd}]
+│   ├── datahub.py         DataHub SDK 封装 + Windows AV 兼容补丁 + 并行抓 haircut
+│   ├── scoring.py         std 年化、硬过滤、置信下界打分、biyi 并入
+│   ├── slack_message.py   表格渲染 + webhook POST（含重试）
+│   ├── queries.py         （历史遗留；qijia 已废弃，文件已不参与主流程）
+│   └── main.py            入口：load_config → 拉数 → 排序 → 发 Slack
+├── tests/                 单元测试（pytest）
+├── deploy/                run_daily.bat + 部署说明
+├── scripts/               临时调试脚本（不进主流程）
+├── config.yaml.example    复制为 config.yaml 后填值；config.yaml 是 git-ignored
+└── pyproject.toml
 ```
 
-## Dev setup (mac/Linux)
+## 配置（config.yaml）
+
+```yaml
+biyi:
+  base_url: "https://biyi.tky.laozi.pro/biyi/api"
+  # query 在 server 端做账户和最小持仓过滤。
+  # productType 部分代码会自动追加，这里不用写。
+  query: "$accountMap like XXX and $maxPositionQty gt 10"
+
+slack:
+  webhook: ""              # 必填，Slack incoming webhook
+  channel: ""              # 可选，webhook 模式下未用
+
+datahub:
+  prefix: "CYBERX_PROD"    # haircut 命名空间
+  api_key: "..."
+  gateway_url: "https://nexus.tyo.cyberx.com/nexus-data-hub-gateway/"
+  cache_dir: ""            # 空 = ~/.datahub_cache；Windows AV 撞写权限就指到可写路径
+
+filters:
+  min_haircut: 0.5         # < 此值的币丢掉（NaN 视为 0）
+  min_oi_usd: 5000000      # OI < 5M USD 丢掉
+
+score:
+  confidence_z: 1.645      # 一侧 z；越大越保守
+
+proxy: ""                  # Binance + Slack 走代理；DataHub 与 biyi（内网）不走
+
+# 以下为兼容旧 config 的占位，不影响逻辑
+qijia: { ... }             # 已废弃（biyi 走 API 了）
+score_weights: { ... }     # 已废弃（score 已改成置信下界）
+```
+
+## 本地开发
 
 ```bash
-python -m venv .venv
+./bootstrap.sh           # 或手动: python -m venv .venv && pip install -r requirements.txt && pip install -e .
 source .venv/bin/activate
-pip install -r requirements.txt
-pip install -e .             # makes `python -m funding_top10.main` work
-pip install pytest           # for unit tests
-pytest                        # runs config + scoring + slack_message tests
-```
-
-`pip install -e .` is required because the source lives under `src/`. Without it
-you'd have to set `PYTHONPATH=src` manually each time you run.
-
-## Running locally (with a real DB)
-
-```bash
+pytest                   # 单测
 cp config.yaml.example config.yaml
-# edit config.yaml — fill in qijia.host/port/user/password/database and slack.webhook
+# 填值
 python -m funding_top10.main
 ```
 
-## Configuration
+## 部署
 
-Everything lives in `config.yaml` (git-ignored — use `config.yaml.example` as a template).
-
-```yaml
-qijia:
-  host: ""           # required (only used for the biyi tickers query)
-  port: 5432         # required
-  user: ""           # required
-  password: ""       # required — URL-encoded automatically when building the DSN
-  database: ""       # required
-
-slack:
-  webhook: ""        # required — Slack incoming webhook URL
-  channel: ""        # optional — only needed if you later switch to files.upload
-
-binance:
-  api_key: ""        # optional — only needed for the signed /sapi/v1/portfolio/collateralRate
-  api_secret: ""     # endpoint that supplies the "haircut" column. Without keys,
-                     # haircut will be NaN; everything else still works.
-```
-
-The qijia DSN is constructed at runtime as `postgresql+psycopg2://USER:PASSWORD@HOST:PORT/DATABASE`. User and password are URL-encoded so special characters (`@`, `/`, `#`, etc.) are safe.
-
-## Tweaking the SQL
-
-- The "top X by mean" cut is 50 by default; "top N final" is 10. Both are kwargs on `scoring.select_top10()` and can be changed in `main.py`.
-- The biyi lookback window is "1 day" via `biyi_tickers_sql(lookback_interval)`. Change in `main.py` if needed.
-- BINANCE-U restriction is hardcoded in `queries.py`. To re-enable other exchanges, edit the `exchange = 'BINANCE-U'` filters in the CTEs.
-
-## Deployment
-
-See `deploy/README.md`.
+Windows Task Scheduler 每天 08:00 北京时间触发 `deploy/run_daily.bat`，细节看 `deploy/README.md`。

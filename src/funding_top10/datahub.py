@@ -33,12 +33,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_SDK_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".datahub_cache")
 
 
-# Default look-back for the haircut market-data query. We open the window
-# wide (90 days back, end pushed to far future) so even tokens whose haircut
-# data updates infrequently — or whose data feed stopped a while ago — still
-# return at least the most recent sample. The DataFrame we get back will be
-# sorted by sample_time and the latest row is used.
-DEFAULT_HAIRCUT_LOOKBACK_DAYS = 90
+# Default look-back for the haircut market-data query. 7 days is enough — the
+# SDK retries with MAX end_time if the initial window is empty (mirrors
+# alpha's is_backfill=True), so an inactive feed is still captured.
+DEFAULT_HAIRCUT_LOOKBACK_DAYS = 7
 
 # Sentinel for the end_time. Must match the SDK's Constants.MAX_TIMESTAMP
 # (13 digits, ~year 2286); passing a larger value gets silently filtered to

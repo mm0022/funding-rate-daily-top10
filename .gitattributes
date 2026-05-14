@@ -1,0 +1,9 @@
+# Force CRLF for Windows-only shell scripts. Without this, .bat files committed
+# on mac/Linux get LF line endings and cmd.exe mis-parses them (commands look
+# like "setlocal" but get truncated to "tlocal" etc).
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Everything else: let git normalize (default).
+* text=auto

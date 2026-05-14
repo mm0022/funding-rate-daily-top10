@@ -14,6 +14,8 @@ if str(_SRC_DIR) not in sys.path:
 
 import datetime  # noqa: E402
 import logging  # noqa: E402
+import socket  # noqa: E402
+import traceback  # noqa: E402
 
 import pandas as pd  # noqa: E402
 
@@ -28,12 +30,30 @@ logger = logging.getLogger(__name__)
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 
+# Slack accepts up to ~40k chars per message; keep the traceback portion well
+# under that so the "what failed" line + traceback fit comfortably.
+_MAX_TRACEBACK_CHARS = 6000
 
 
+def _notify_failure(cfg, exc: BaseException) -> None:
+    """Best-effort: send a failure notice to Slack. Never raises."""
+    tb = traceback.format_exc()
+    if len(tb) > _MAX_TRACEBACK_CHARS:
+        tb = "…(truncated)…\n" + tb[-_MAX_TRACEBACK_CHARS:]
+    host = socket.gethostname()
+    now = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    msg = (
+        f":rotating_light: *funding-top10 跑挂了* — {now} (host: `{host}`)\n"
+        f"`{type(exc).__name__}: {exc}`\n"
+        f"```\n{tb}\n```"
+    )
+    try:
+        post_to_slack(cfg.slack.webhook, msg, proxy=cfg.proxy)
+    except Exception:
+        logger.exception("Failed to deliver failure notice to Slack")
 
-def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    cfg = load_config()
+
+def _run_pipeline(cfg) -> None:
     proxy_repr = cfg.proxy or "(none)"
 
     logger.info("Fetching funding/OI from Binance API (proxy=%s)…", proxy_repr)
@@ -119,7 +139,23 @@ def main() -> int:
     logger.info("Posting to Slack (proxy=%s)…", proxy_repr)
     post_to_slack(cfg.slack.webhook, message, proxy=cfg.proxy)
     logger.info("Done.")
-    return 0
+
+
+def main() -> int:
+    """Entry point. Wraps the pipeline so any failure is reported to Slack
+    rather than killing the run silently from Task Scheduler's perspective."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    cfg = load_config()
+    try:
+        _run_pipeline(cfg)
+        return 0
+    except KeyboardInterrupt:
+        # Manual cancel — don't spam Slack with a "failure" notice.
+        raise
+    except Exception:
+        logger.exception("Pipeline failed")
+        _notify_failure(cfg, sys.exc_info()[1])
+        return 1
 
 
 if __name__ == "__main__":

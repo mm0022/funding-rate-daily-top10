@@ -34,12 +34,32 @@ FAPI_BASE = "https://fapi.binance.com"
 MAX_CONCURRENCY = 2  # was 30 -> 5 -> 2; Binance fapi 403s aggressively under burst load
 HTTP_TIMEOUT = 30.0
 
+# 403 from fapi means we tripped the rate limit / WAF. Sleeping the full
+# concurrent batch for a few minutes is more polite than retrying instantly.
+RETRY_HTTP_STATUSES = {403, 418, 429}
+RETRY_WAIT_SECONDS = 180   # 3 minutes per user spec
+MAX_RETRIES = 3            # total 4 attempts (1 + 3 retries) ⇒ up to ~9 min per call
+
 
 async def _get_json(client: httpx.AsyncClient, url: str, *, params: dict | None = None,
                     headers: dict | None = None) -> Any:
-    resp = await client.get(url, params=params, headers=headers)
-    resp.raise_for_status()
-    return resp.json()
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp = await client.get(url, params=params, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status in RETRY_HTTP_STATUSES and attempt < MAX_RETRIES:
+                logger.warning(
+                    "Binance %s returned %d (attempt %d/%d); sleeping %ds before retry",
+                    url, status, attempt + 1, MAX_RETRIES + 1, RETRY_WAIT_SECONDS,
+                )
+                await asyncio.sleep(RETRY_WAIT_SECONDS)
+                continue
+            raise
+    # Unreachable: loop either returns or raises.
+    raise RuntimeError(f"_get_json exhausted retries for {url}")
 
 
 async def fetch_premium_index_all(client: httpx.AsyncClient) -> list[dict]:

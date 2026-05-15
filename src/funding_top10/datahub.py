@@ -16,6 +16,8 @@ imported (and the pure helpers below tested) without the SDK present.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 import os
@@ -23,6 +25,8 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from funding_top10.cache_util import (
     LIVE,
@@ -168,15 +172,18 @@ def extract_haircut_value(value: Any) -> float | None:
 
 
 class DataHub:
-    """Thin wrapper around nexus_data_hub_sdk.Client.
+    """DataHub haircut reader.
 
-    Two read methods:
-      - load_value: latest sequenced value (JSON content), via
-        request_latest_sequenced_data. Used by miscellaneous key-value reads;
-        not used for the haircut path anymore.
-      - load_haircut_value: market-data time-series request via client.request,
-        same call alpha makes via DataHubClient.market_data_request. Returns
-        the latest haircut value parsed from the resulting DataFrame.
+    Historically wrapped ``nexus_data_hub_sdk.Client``, but the SDK's
+    CSV→DataFrame parser drops every row whose haircut column contains an
+    embedded JSON tier list (the embedded commas break field splitting; the
+    SDK reports ``shape=(0, 6)`` even when the raw response has 1000+ rows).
+    So ``load_haircut_value`` now talks to ``/data-hub-prime/data-api/v1/list``
+    directly with httpx and parses ``hot_data[].data`` ourselves.
+
+    The SDK Client is still constructed (lazily) so other callers using
+    ``load_value`` for sequenced JSON keys keep working, but it's no longer
+    on the haircut path.
     """
 
     def __init__(self, prefix: str, api_key: str, gateway_url: str,
@@ -187,30 +194,33 @@ class DataHub:
                 "DataHub requires non-empty prefix, api_key, and gateway_url. "
                 "Fill in the [datahub] section in config.yaml."
             )
-        # Lazy import: keeps this module importable in environments where the
-        # SDK isn't installed (e.g. CI, mac dev box).
-        from nexus_data_hub_sdk import Client  # noqa: PLC0415
-        _patch_sdk_move_file_for_windows_av()
 
         self.prefix = prefix
+        self._gateway_url = gateway_url
+        self._api_key = api_key
+        self._api_timeout = api_timeout
 
-        # Resolve the SDK's local cache dir to somewhere we can definitely write.
-        # The SDK's default is './.data' (relative to CWD) which fails with
-        # WinError 5 on locked-down Windows. Pre-create the dir so the SDK
-        # doesn't have to.
-        cache_dir = cache_directory or DEFAULT_SDK_CACHE_DIR
-        os.makedirs(cache_dir, exist_ok=True)
+        # SDK Client is lazy: only constructed if load_value is actually called.
+        # The haircut path no longer needs it, so we can ride out runs where
+        # the SDK isn't installed (e.g. mac dev box).
+        self._sdk_client: Any = None
+        self._sdk_cache_dir = cache_directory or DEFAULT_SDK_CACHE_DIR
 
-        self._client = Client(
-            api_key=api_key,
-            gateway_url=gateway_url,
-            api_timeout=api_timeout,
-            route_meta_uri="",
-            missing_exception=False,
-            updated_exception=False,
-            directory=cache_dir,
-        )
-
+    def _get_sdk_client(self) -> Any:
+        if self._sdk_client is None:
+            from nexus_data_hub_sdk import Client  # noqa: PLC0415
+            _patch_sdk_move_file_for_windows_av()
+            os.makedirs(self._sdk_cache_dir, exist_ok=True)
+            self._sdk_client = Client(
+                api_key=self._api_key,
+                gateway_url=self._gateway_url,
+                api_timeout=self._api_timeout,
+                route_meta_uri="",
+                missing_exception=False,
+                updated_exception=False,
+                directory=self._sdk_cache_dir,
+            )
+        return self._sdk_client
 
     def load_value(self, key: str) -> Any | None:
         """Return the latest JSON-decoded value for `key`, or None if missing.
@@ -219,7 +229,7 @@ class DataHub:
         (which lives under the market-data namespace).
         """
         full_key = normalize_key(key, self.prefix)
-        hub_data = self._client.request_latest_sequenced_data(full_key)
+        hub_data = self._get_sdk_client().request_latest_sequenced_data(full_key)
         if hub_data.data is None or hub_data.data.empty:
             return None
         item = hub_data.data.iloc[0]
@@ -230,20 +240,16 @@ class DataHub:
         return content
 
     def load_haircut_value(self, symbol: str,
-                           *, lookback_days: int = DEFAULT_HAIRCUT_LOOKBACK_DAYS) -> float | None:
-        """Fetch the latest haircut for a market-data symbol via the SDK's
-        ``Client.request``. Mirrors alpha's market_data_request(is_backfill=True):
-          1. request [now - lookback, now]
-          2. if empty, retry [now - lookback, MAX_TIMESTAMP]
-        Returns the latest sample's first-tier ``value``, or ``None``.
-        """
-        now_ms = int(time.time() * 1000)
-        start_ms = now_ms - lookback_days * 24 * 3600 * 1000
+                           *, lookback_days: int = DEFAULT_HAIRCUT_LOOKBACK_DAYS) -> float | None:  # noqa: ARG002
+        """Latest haircut for the given DataHub symbol, or None.
 
-        hub_data = self._client.request(symbol, start_time=start_ms, end_time=now_ms)
-        if hub_data.data is None or hub_data.data.empty:
-            hub_data = self._client.request(symbol, start_time=start_ms, end_time=_FAR_FUTURE_MS)
-        return parse_haircut_from_market_data_df(hub_data.data)
+        ``lookback_days`` kept for signature compatibility but unused — the
+        list API returns whatever DataHub currently retains for the sym, and
+        we pick the row with the newest ``sample_time``.
+        """
+        return _fetch_haircut_via_list_api(
+            self._gateway_url, self._api_key, symbol, timeout=self._api_timeout,
+        )
 
 
 _sdk_move_file_patched = False
@@ -278,6 +284,130 @@ def _patch_sdk_move_file_for_windows_av() -> None:
     _fh.FileHelper.move_file = staticmethod(_move_no_chmod)
     _sdk_move_file_patched = True
     logger.info("nexus_data_hub_sdk.FileHelper.move_file patched (no chmod) to dodge Windows AV")
+
+
+# Matches "BINANCE_MARGIN_BTC.HAIRCUT" -> exchange=BINANCE, business=MARGIN,
+# sym=BTC, category=HAIRCUT. Token names can contain digits / underscores / dots,
+# but the exchange / business prefixes are always alpha.
+_SYMBOL_RE = re.compile(r"^([A-Z]+)_([A-Z]+)_(.+)\.([A-Z_]+)$")
+
+
+def _parse_hot_data_row(row_str: str) -> tuple[int, float] | None:
+    """Parse one ``hot_data[].data[]`` CSV string into (sample_time_ms, value).
+
+    Each row looks like:
+        '1772323200000,1772326799999,1772323200000,BTC,"[{""left"":0,""right"":9999999999999,""value"":0.95}]",true'
+
+    Column 3 is sample_time. Column 5 is a JSON tier list (quoted, with
+    embedded commas — that's what trips the SDK's naïve CSV parser). We use
+    csv.reader with ``quotechar='"'`` so the embedded commas are respected.
+    """
+    try:
+        reader = csv.reader(io.StringIO(row_str), quotechar='"', skipinitialspace=True)
+        row = next(reader, None)
+    except Exception:  # noqa: BLE001
+        return None
+    if not row or len(row) < 5:
+        return None
+    try:
+        sample_time = int(row[2])
+    except (TypeError, ValueError):
+        return None
+    try:
+        tiers = json.loads(row[4])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(tiers, list) or not tiers or not isinstance(tiers[0], dict):
+        return None
+    try:
+        value = float(tiers[0].get("value"))
+    except (TypeError, ValueError):
+        return None
+    if value != value:  # NaN
+        return None
+    return sample_time, value
+
+
+def _fetch_haircut_via_list_api(
+    gateway_url: str,
+    api_key: str,
+    symbol: str,
+    *,
+    timeout: float = 15.0,
+) -> float | None:
+    """Hit /data-hub-prime/data-api/v1/list directly and return the most-recent
+    haircut value for ``symbol``, or ``None`` if no parseable row.
+
+    Why this exists: ``nexus_data_hub_sdk.Client.request()`` parses
+    ``hot_data[].data`` into a DataFrame internally, and its CSV splitter does
+    NOT respect ``quotechar`` — every row whose haircut column contains an
+    embedded JSON list gets dropped silently. The SDK returns ``shape=(0, 6)``
+    even when the raw response has 1000+ valid rows. We can't fix the SDK in
+    place, so we bypass it.
+
+    Time window: we ask for ``[0, MAX_TIMESTAMP]`` so DataHub returns all of
+    its currently-retained data for this sym. Picking the row with the newest
+    ``sample_time`` gives us the latest haircut. This handles the "yesterday
+    had haircut, today it's 0" case cleanly: today's 0 wins because it has the
+    newest sample_time.
+    """
+    m = _SYMBOL_RE.match(symbol)
+    if not m:
+        logger.warning("haircut symbol does not match expected pattern: %s", symbol)
+        return None
+    exchange, business, sym, category = m.groups()
+
+    base = gateway_url.rstrip("/")
+    if base.endswith("/nexus-data-hub-gateway"):
+        base = base[: -len("/nexus-data-hub-gateway")]
+    url = f"{base}/data-hub-prime/data-api/v1/list"
+
+    params = {
+        "exchange": exchange,
+        "business": business,
+        "category": category,
+        "sym": sym,
+        "start": 0,
+        "end": 9_999_999_999_999,
+    }
+    headers = {"X-API-Key": api_key} if api_key else {}
+
+    try:
+        resp = httpx.get(url, params=params, headers=headers, timeout=timeout)
+    except (httpx.RequestError, httpx.HTTPError) as e:
+        logger.warning("haircut list-API request failed for %s: %r", symbol, e)
+        return None
+    if resp.status_code != 200:
+        # 422 "is not configured" is common for tokens DataHub doesn't track —
+        # downgrade to debug-ish so it doesn't drown the log on hundreds of
+        # such tokens.
+        if resp.status_code == 422:
+            return None
+        logger.warning(
+            "haircut list-API non-200 for %s: status=%d body[:200]=%r",
+            symbol, resp.status_code, resp.text[:200],
+        )
+        return None
+
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.warning("haircut list-API returned non-JSON for %s", symbol)
+        return None
+
+    hot = data.get("hot_data") or []
+    latest_sample_time = -1
+    latest_value: float | None = None
+    for group in hot:
+        for row_str in group.get("data") or []:
+            parsed = _parse_hot_data_row(row_str)
+            if parsed is None:
+                continue
+            sample_time, value = parsed
+            if sample_time > latest_sample_time:
+                latest_sample_time = sample_time
+                latest_value = value
+    return latest_value
 
 
 def parse_haircut_from_market_data_df(df: Any) -> float | None:

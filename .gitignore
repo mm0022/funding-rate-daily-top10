@@ -1,6 +1,7 @@
 .venv/
 .DS_Store
 datahub_cache/
+cache/
 __pycache__/
 *.pyc
 *.pyo

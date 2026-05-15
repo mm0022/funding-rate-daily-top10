@@ -9,8 +9,12 @@ import sys
 from pathlib import Path
 
 _SRC_DIR = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = _SRC_DIR.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
+
+# Where the haircut cache lives. cache/ is git-ignored.
+_HAIRCUT_CACHE_PATH = _PROJECT_ROOT / "cache" / "haircuts.json"
 
 import datetime  # noqa: E402
 import logging  # noqa: E402
@@ -22,7 +26,7 @@ import pandas as pd  # noqa: E402
 from funding_top10.binance_api import fetch_funding_dataframe  # noqa: E402
 from funding_top10.biyi_api import fetch_biyi_positions  # noqa: E402
 from funding_top10.config import load_config  # noqa: E402
-from funding_top10.datahub import DataHub, load_binance_haircuts  # noqa: E402
+from funding_top10.datahub import DataHub, load_haircuts_with_cache  # noqa: E402
 from funding_top10.scoring import ScoreWeights, select_rows_to_show  # noqa: E402
 from funding_top10.slack_message import build_message, post_to_slack  # noqa: E402
 
@@ -83,14 +87,22 @@ def _run_pipeline(cfg) -> None:
         "Fetching haircut for %d tokens from DataHub (all bases ∪ biyi)…",
         len(tokens_to_fetch),
     )
-    datahub = DataHub(
-        prefix=cfg.datahub.prefix,
-        api_key=cfg.datahub.api_key,
-        gateway_url=cfg.datahub.gateway_url,
-        cache_directory=cfg.datahub.cache_dir or None,
+    try:
+        datahub = DataHub(
+            prefix=cfg.datahub.prefix,
+            api_key=cfg.datahub.api_key,
+            gateway_url=cfg.datahub.gateway_url,
+            cache_directory=cfg.datahub.cache_dir or None,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("DataHub init failed (%s); will try haircut cache", e)
+        datahub = None
+    haircuts = load_haircuts_with_cache(
+        _HAIRCUT_CACHE_PATH,
+        datahub=datahub,
+        tokens=tokens_to_fetch,
     )
-    haircuts = load_binance_haircuts(datahub, tokens_to_fetch)
-    logger.info("Got %d haircut values from DataHub", len(haircuts))
+    logger.info("Got %d haircut values (DataHub or cache)", len(haircuts))
     # Tokens DataHub doesn't return get haircut=0 (per user spec). This means
     # they fail the haircut>=0.5 filter and are excluded from the top-N pool,
     # but the value is still rendered as "0.00" in the table rather than "n/a".

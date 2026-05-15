@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -377,3 +378,121 @@ def load_binance_haircuts(datahub: DataHub, tokens: list[str],
         len(haircuts), len(ascii_tokens), not_found[:20],
     )
     return haircuts
+
+
+# ---------------------------------------------------------------------------
+# Cache-aside: persist successful haircut lookups so a future DataHub outage
+# still produces a usable report. Cache lives in project_root/cache/haircuts.json
+# (git-ignored). Format:
+#   {"saved_at_unix_ms": 1747200000000, "haircuts": {"BTC": 0.95, ...}}
+# ---------------------------------------------------------------------------
+
+
+def _save_haircut_cache(path: Path, haircuts: dict[str, float]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "saved_at_unix_ms": int(time.time() * 1000),
+        "haircuts": haircuts,
+    }
+    # Atomic write: tmp + replace so a crash mid-write can't corrupt the cache.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+
+
+def _load_haircut_cache(path: Path) -> tuple[dict[str, float], int] | None:
+    """Return (haircuts, saved_at_unix_ms) or None if the cache is missing /
+    corrupt. ``saved_at_unix_ms`` may be 0 if the field is absent."""
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to parse haircut cache at %s: %s", path, e)
+        return None
+
+    raw = payload.get("haircuts") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, float] = {}
+    for k, v in raw.items():
+        try:
+            out[str(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    try:
+        saved_at_ms = int(payload.get("saved_at_unix_ms") or 0)
+    except (TypeError, ValueError):
+        saved_at_ms = 0
+    return (out, saved_at_ms)
+
+
+def load_haircuts_with_cache(
+    cache_path: Path | str,
+    *,
+    datahub: DataHub | None,
+    tokens: list[str],
+    max_workers: int = 10,
+) -> dict[str, float]:
+    """Try DataHub; on failure fall back to the on-disk cache.
+
+    ``datahub`` may be ``None`` (caller's DataHub.__init__ raised — e.g. the SDK
+    isn't installed, or the gateway URL is unreachable). In that case we skip
+    the live fetch and go straight to the cache.
+
+    Behaviour:
+      - DataHub returns a non-empty dict  → persist + return it
+      - DataHub raises OR returns {}      → log a warning, return cache contents
+                                             (empty dict if no cache file)
+
+    Partial DataHub success (some tokens missing) still counts as success — the
+    cache is overwritten with whatever DataHub returned this run. So a token
+    that disappears from DataHub also disappears from the cache the next time
+    DataHub responds at all.
+    """
+    cache_path = Path(cache_path)
+    haircuts: dict[str, float] = {}
+
+    if datahub is not None:
+        try:
+            haircuts = load_binance_haircuts(datahub, tokens, max_workers=max_workers)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("DataHub haircut fetch raised (%s); will try cache", e)
+
+    if haircuts:
+        try:
+            _save_haircut_cache(cache_path, haircuts)
+            logger.info(
+                "haircut cache updated: %d tokens written to %s",
+                len(haircuts), cache_path,
+            )
+        except Exception:
+            logger.exception("Failed to write haircut cache to %s", cache_path)
+        return haircuts
+
+    # Live fetch yielded nothing — try cache.
+    cached = _load_haircut_cache(cache_path)
+    if cached is None:
+        logger.error(
+            "DataHub returned no haircut data AND cache %s is missing — "
+            "all haircuts will be 0",
+            cache_path,
+        )
+        return {}
+
+    haircuts_from_cache, saved_at_ms = cached
+    if saved_at_ms > 0:
+        age_hours = (time.time() * 1000 - saved_at_ms) / 3_600_000
+        logger.warning(
+            "Using cached haircut (%d tokens, %.1fh old) — DataHub unavailable",
+            len(haircuts_from_cache), age_hours,
+        )
+    else:
+        logger.warning(
+            "Using cached haircut (%d tokens, unknown age) — DataHub unavailable",
+            len(haircuts_from_cache),
+        )
+    return haircuts_from_cache

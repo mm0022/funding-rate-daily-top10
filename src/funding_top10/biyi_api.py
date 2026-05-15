@@ -19,9 +19,19 @@ httpx.Client and biyi auto-trusts it from the internal network.
 from __future__ import annotations
 
 import logging
+import time
+from pathlib import Path
 from typing import Any
 
 import httpx
+
+from funding_top10.cache_util import (
+    LIVE,
+    NONE,
+    DataSource,
+    read_cache,
+    write_cache,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,3 +143,74 @@ def fetch_biyi_positions(
         len(strategies), len(kept), len(positions),
     )
     return positions
+
+
+def fetch_biyi_positions_with_cache(
+    cache_path: Path | str,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    query: str = "",
+    proxy: str = "",
+    timeout: float = 15.0,
+) -> tuple[list[dict], DataSource]:
+    """Like fetch_biyi_positions but with on-disk cache fallback.
+
+      - live success (non-empty list) → write cache, return (positions, LIVE)
+      - live raised OR returned []    → read cache, return (cached, DataSource(cache))
+      - cache also missing            → return ([], NONE)
+
+    Note: an empty result from biyi (no LONGSHORT strategies today) is treated
+    the same as "fetch failed" for cache-fallback purposes — we only consider
+    biyi's reply authoritative when it returned at least one position. If you
+    legitimately want "today there are zero positions" to clear the cache,
+    that's a separate decision.
+    """
+    cache_path = Path(cache_path)
+    positions: list[dict] = []
+    try:
+        positions = fetch_biyi_positions(
+            base_url=base_url,
+            query=query,
+            proxy=proxy,
+            timeout=timeout,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("biyi fetch raised (%s); will try cache", e)
+
+    if positions:
+        try:
+            write_cache(cache_path, positions)
+            logger.info(
+                "biyi cache updated: %d tickers → %s",
+                len(positions), cache_path,
+            )
+        except Exception:
+            logger.exception("Failed to write biyi cache to %s", cache_path)
+        return positions, LIVE
+
+    cached = read_cache(cache_path)
+    if cached is None:
+        logger.error(
+            "biyi fetch returned nothing AND cache %s is missing — "
+            "no biyi positions available",
+            cache_path,
+        )
+        return [], NONE
+
+    raw_payload, saved_at_ms = cached
+    if not isinstance(raw_payload, list):
+        logger.warning("biyi cache payload not a list; treating as empty")
+        return [], NONE
+
+    if saved_at_ms > 0:
+        age_hours = (time.time() * 1000 - saved_at_ms) / 3_600_000
+        logger.warning(
+            "Using cached biyi (%d tickers, %.1fh old) — biyi unavailable",
+            len(raw_payload), age_hours,
+        )
+    else:
+        logger.warning(
+            "Using cached biyi (%d tickers, unknown age) — biyi unavailable",
+            len(raw_payload),
+        )
+    return raw_payload, DataSource(kind="cache", saved_at_ms=saved_at_ms or None)

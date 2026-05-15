@@ -17,14 +17,24 @@ slack_message code stays identical:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import statistics
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pandas as pd
+
+from funding_top10.cache_util import (
+    LIVE,
+    NONE,
+    DataSource,
+    read_cache,
+    write_cache,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -280,3 +290,64 @@ def fetch_funding_dataframe(proxy: str = "") -> pd.DataFrame:
     from DataHub in the caller (see funding_top10/datahub.load_binance_haircuts).
     """
     return asyncio.run(_fetch_all_async(proxy))
+
+
+def fetch_funding_dataframe_with_cache(
+    cache_path: Path | str,
+    *,
+    proxy: str = "",
+) -> tuple[pd.DataFrame, DataSource]:
+    """Like fetch_funding_dataframe but with on-disk cache fallback.
+
+    Behaviour:
+      - live success      → write cache, return (df, LIVE)
+      - live raised / empty → read cache, return (cached_df, DataSource(cache))
+      - cache also missing → return (empty df, NONE) so caller can decide
+
+    The cache file is a JSON envelope of records (df.to_json(orient='records')
+    round-tripped through Python so numpy / Decimal types become plain JSON).
+    """
+    cache_path = Path(cache_path)
+    df: pd.DataFrame | None = None
+    try:
+        df = fetch_funding_dataframe(proxy=proxy)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Binance fapi fetch raised (%s); will try cache", e)
+
+    if df is not None and not df.empty:
+        try:
+            # Roundtrip through pandas' JSON writer so NaN -> null and numpy
+            # scalars become plain Python — both safe for json.dumps.
+            records = json.loads(df.to_json(orient="records"))
+            write_cache(cache_path, records)
+            logger.info("funding cache updated: %d rows → %s", len(df), cache_path)
+        except Exception:
+            logger.exception("Failed to write funding cache to %s", cache_path)
+        return df, LIVE
+
+    cached = read_cache(cache_path)
+    if cached is None:
+        logger.error(
+            "Binance fapi failed AND funding cache %s is missing — "
+            "no funding data available",
+            cache_path,
+        )
+        return pd.DataFrame(), NONE
+
+    records, saved_at_ms = cached
+    if not isinstance(records, list):
+        logger.warning("Funding cache payload not a list; treating as empty")
+        return pd.DataFrame(), NONE
+    df_cached = pd.DataFrame(records)
+    if saved_at_ms > 0:
+        age_hours = (time.time() * 1000 - saved_at_ms) / 3_600_000
+        logger.warning(
+            "Using cached funding (%d rows, %.1fh old) — Binance fapi unavailable",
+            len(df_cached), age_hours,
+        )
+    else:
+        logger.warning(
+            "Using cached funding (%d rows, unknown age) — Binance fapi unavailable",
+            len(df_cached),
+        )
+    return df_cached, DataSource(kind="cache", saved_at_ms=saved_at_ms or None)

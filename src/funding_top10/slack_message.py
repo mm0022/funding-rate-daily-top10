@@ -20,10 +20,15 @@ Columns (in order):
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone, timedelta
 from typing import Iterable
 
 import httpx
 import pandas as pd
+
+from funding_top10.cache_util import DataSource, format_age_human
+
+_BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 HIGHLIGHT = "🔴 "  # emoji + 1 ASCII space ≈ 3 monospace cells in Slack
@@ -251,6 +256,27 @@ def _row_line(
     )
 
 
+def _format_source_line(label: str, src: DataSource | None) -> str | None:
+    """Single 'biyi: live' / 'biyi: cached 05-14 08:01 (1d 2h ago)' line.
+
+    Returns ``None`` if src is missing — caller filters those out. ``None`` for
+    src effectively means "the source wasn't even attempted this run", which
+    shouldn't normally happen.
+    """
+    if src is None:
+        return None
+    if src.kind == "live":
+        return f"{label}: live"
+    if src.kind == "cache":
+        if src.saved_at_ms:
+            bj = datetime.fromtimestamp(src.saved_at_ms / 1000, tz=_BEIJING_TZ)
+            ts = bj.strftime("%Y-%m-%d %H:%M")
+            return f"{label}: cached from {ts} ({format_age_human(src.saved_at_ms)})"
+        return f"{label}: cached (unknown age)"
+    # "none"
+    return f"{label}: unavailable"
+
+
 def build_message(
     rows_df: pd.DataFrame,
     biyi_tickers: Iterable[str],
@@ -258,6 +284,7 @@ def build_message(
     *,
     position_by_ticker: dict[str, float] | None = None,
     total_position_usd: float = 0.0,
+    data_sources: dict[str, DataSource] | None = None,
 ) -> str:
     """Render the merged Top10 + biyi table for Slack.
 
@@ -265,6 +292,10 @@ def build_message(
     maxPositionQty across that ticker's strategies). ``total_position_usd`` is
     the denominator used for the per-row pct% column. Both default to empty
     so callers / tests written before the pos/pct columns existed still work.
+
+    ``data_sources`` is an optional mapping of {"funding"|"biyi"|"haircut" ->
+    DataSource}. When provided, a footer is appended listing where each piece
+    of data came from and how stale a cache fallback is.
     """
     biyi_set = set(biyi_tickers)
     pos_map = position_by_ticker or {}
@@ -281,29 +312,41 @@ def build_message(
         lines.append("")
         lines.append(f"_Biyi tickers (🔴): {', '.join(sorted(biyi_set))}_")
 
+    if data_sources:
+        # Stable order: funding → biyi → haircut. Skip any source not present.
+        order = (("funding", "funding/OI"), ("biyi", "biyi"), ("haircut", "haircut"))
+        source_lines: list[str] = []
+        for key, label in order:
+            line = _format_source_line(label, data_sources.get(key))
+            if line is not None:
+                source_lines.append(line)
+        if source_lines:
+            lines.append("")
+            lines.append("_data sources (Beijing time):_")
+            for sl in source_lines:
+                lines.append(f"_  • {sl}_")
+
     return "\n".join(lines)
 
 
-def post_to_slack(webhook_url: str, message: str, *, proxy: str = "",
-                  timeout: float = 15.0, max_retries: int = 3) -> None:
-    """POST a plain-text message to a Slack incoming webhook. Raises on non-2xx.
+_TRANSIENT_EXCEPTIONS = (
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+)
 
-    proxy: if non-empty, the POST routes through this URL. trust_env is False,
-    so ambient HTTP_PROXY env vars are NOT consulted — the proxy comes only
-    from config.yaml.
 
-    Retries up to ``max_retries`` times on transient connection errors
-    (proxy / Slack closing the connection mid-flight, etc.) with simple
-    exponential back-off.
-    """
-    import logging
+def _post_once(webhook_url: str, message: str, *, proxy: str,
+               timeout: float, max_retries: int, _logger) -> None:
+    """One transport (proxy or direct) with exponential-backoff retries."""
     import time as _time
-
-    logger = logging.getLogger(__name__)
 
     client_kwargs: dict = {"trust_env": False}
     if proxy:
         client_kwargs["proxy"] = proxy
+    label = f"proxy={proxy}" if proxy else "direct"
 
     last_exc: Exception | None = None
     for attempt in range(max_retries + 1):
@@ -312,17 +355,55 @@ def post_to_slack(webhook_url: str, message: str, *, proxy: str = "",
                 resp = client.post(webhook_url, json={"text": message}, timeout=timeout)
                 resp.raise_for_status()
                 return
-        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError,
-                httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+        except _TRANSIENT_EXCEPTIONS as e:
             last_exc = e
             if attempt < max_retries:
                 wait = 2 ** attempt
-                logger.warning(
-                    "Slack POST attempt %d failed (%s); retrying in %ds",
-                    attempt + 1, type(e).__name__, wait,
+                _logger.warning(
+                    "Slack POST (%s) attempt %d failed (%s); retrying in %ds",
+                    label, attempt + 1, type(e).__name__, wait,
                 )
                 _time.sleep(wait)
                 continue
             raise
     if last_exc:
         raise last_exc
+
+
+def post_to_slack(webhook_url: str, message: str, *, proxy: str = "",
+                  timeout: float = 15.0, max_retries: int = 3) -> None:
+    """POST a plain-text message to a Slack incoming webhook. Raises on non-2xx.
+
+    Path order:
+      1. If ``proxy`` is set, try it (with ``max_retries`` retries).
+      2. On transient transport failure of step 1, fall back to **direct** (no
+         proxy) with one retry attempt. Critical when the local proxy itself is
+         dead — failure notices still get out.
+      3. If ``proxy`` is empty, only direct is tried.
+
+    trust_env=False everywhere, so ambient HTTP_PROXY env vars are NOT consulted
+    — the proxy comes only from config.yaml.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if not proxy:
+        _post_once(webhook_url, message, proxy="",
+                   timeout=timeout, max_retries=max_retries, _logger=logger)
+        return
+
+    try:
+        _post_once(webhook_url, message, proxy=proxy,
+                   timeout=timeout, max_retries=max_retries, _logger=logger)
+        return
+    except _TRANSIENT_EXCEPTIONS as e:
+        logger.warning(
+            "Slack POST via proxy=%s failed (%s); falling back to direct",
+            proxy, type(e).__name__,
+        )
+
+    # Direct as last resort. One attempt is enough — if direct is also broken
+    # the network is completely down.
+    _post_once(webhook_url, message, proxy="",
+               timeout=timeout, max_retries=1, _logger=logger)

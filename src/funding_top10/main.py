@@ -13,8 +13,12 @@ _PROJECT_ROOT = _SRC_DIR.parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-# Where the haircut cache lives. cache/ is git-ignored.
-_HAIRCUT_CACHE_PATH = _PROJECT_ROOT / "cache" / "haircuts.json"
+# Cache files (git-ignored). Each pipeline source has its own envelope file
+# under <project_root>/cache/.
+_CACHE_DIR = _PROJECT_ROOT / "cache"
+_FUNDING_CACHE_PATH = _CACHE_DIR / "funding.json"
+_BIYI_CACHE_PATH = _CACHE_DIR / "biyi_positions.json"
+_HAIRCUT_CACHE_PATH = _CACHE_DIR / "haircuts.json"
 
 import datetime  # noqa: E402
 import logging  # noqa: E402
@@ -23,8 +27,8 @@ import traceback  # noqa: E402
 
 import pandas as pd  # noqa: E402
 
-from funding_top10.binance_api import fetch_funding_dataframe  # noqa: E402
-from funding_top10.biyi_api import fetch_biyi_positions  # noqa: E402
+from funding_top10.binance_api import fetch_funding_dataframe_with_cache  # noqa: E402
+from funding_top10.biyi_api import fetch_biyi_positions_with_cache  # noqa: E402
 from funding_top10.config import load_config  # noqa: E402
 from funding_top10.datahub import DataHub, load_haircuts_with_cache  # noqa: E402
 from funding_top10.scoring import ScoreWeights, select_rows_to_show  # noqa: E402
@@ -61,17 +65,32 @@ def _run_pipeline(cfg) -> None:
     proxy_repr = cfg.proxy or "(none)"
 
     logger.info("Fetching funding/OI from Binance API (proxy=%s)…", proxy_repr)
-    funding_df = fetch_funding_dataframe(proxy=cfg.proxy)
-    logger.info("Got %d BINANCE-U USDT-perp rows from Binance API", len(funding_df))
+    funding_df, funding_src = fetch_funding_dataframe_with_cache(
+        _FUNDING_CACHE_PATH, proxy=cfg.proxy,
+    )
+    logger.info(
+        "Got %d BINANCE-U USDT-perp rows (source=%s)",
+        len(funding_df), funding_src.kind,
+    )
+    if funding_df.empty:
+        # Without funding/OI there's nothing meaningful to score or render.
+        raise RuntimeError(
+            "No funding data available (live fetch failed and no cache). "
+            "Cannot continue."
+        )
 
     logger.info("Fetching biyi positions from %s (query=%r)…", cfg.biyi.base_url, cfg.biyi.query)
-    biyi_positions = fetch_biyi_positions(base_url=cfg.biyi.base_url, query=cfg.biyi.query)
+    biyi_positions, biyi_src = fetch_biyi_positions_with_cache(
+        _BIYI_CACHE_PATH,
+        base_url=cfg.biyi.base_url,
+        query=cfg.biyi.query,
+    )
     biyi = [p["ticker"] for p in biyi_positions]
     position_by_ticker = {p["ticker"]: float(p["position_usd"]) for p in biyi_positions}
     total_position_usd = sum(position_by_ticker.values())
     logger.info(
-        "Got %d biyi tickers from API (total position_usd=%.2f)",
-        len(biyi), total_position_usd,
+        "Got %d biyi tickers (source=%s, total position_usd=%.2f)",
+        len(biyi), biyi_src.kind, total_position_usd,
     )
     for p in biyi_positions:
         pct = (p["position_usd"] / total_position_usd) if total_position_usd > 0 else 0.0
@@ -97,12 +116,15 @@ def _run_pipeline(cfg) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("DataHub init failed (%s); will try haircut cache", e)
         datahub = None
-    haircuts = load_haircuts_with_cache(
+    haircuts, haircut_src = load_haircuts_with_cache(
         _HAIRCUT_CACHE_PATH,
         datahub=datahub,
         tokens=tokens_to_fetch,
     )
-    logger.info("Got %d haircut values (DataHub or cache)", len(haircuts))
+    logger.info(
+        "Got %d haircut values (source=%s)",
+        len(haircuts), haircut_src.kind,
+    )
     # Tokens DataHub doesn't return get haircut=0 (per user spec). This means
     # they fail the haircut>=0.5 filter and are excluded from the top-N pool,
     # but the value is still rendered as "0.00" in the table rather than "n/a".
@@ -146,6 +168,11 @@ def _run_pipeline(cfg) -> None:
         report_date_str=today_beijing,
         position_by_ticker=position_by_ticker,
         total_position_usd=total_position_usd,
+        data_sources={
+            "funding": funding_src,
+            "biyi": biyi_src,
+            "haircut": haircut_src,
+        },
     )
 
     logger.info("Posting to Slack (proxy=%s)…", proxy_repr)
